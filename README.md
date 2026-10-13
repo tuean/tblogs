@@ -26,30 +26,61 @@ cargo install --path . --locked     # 装到 ~/.cargo/bin，两个命令都可�
 
 客户端是**单文件**的：schema 编译在二进制里，运行时不读任何外部文件。
 
-## 快速开始
+## 日常使用
+
+### 一次性配置
+
+写进 `~/.zshrc`，之后命令就不用带参数了（每个选项都有对应的环境变量）：
 
 ```bash
-cargo build --release
-
-# 1. 看着写：指向你的 Markdown 目录，改一个文件浏览器里就更新
-./target/release/tblogs-admin preview --content-dir ~/Documents/blog
-
-# 2. 生成内容包 + 部署文件
-./target/release/tblogs-admin build  --content-dir ~/Documents/blog --out dist \
-    --site-url https://blog.example.com --title 我的博客
-./target/release/tblogs-admin bundle --out dist --domain blog.example.com
-
-# 3. 发布到服务器（需要事先配好 SSH 免密）
-./target/release/tblogs-admin publish --out dist --to user@server:/srv/tblogs
-
-# 4. 在服务器上装一次
-ssh user@server 'sudo bash /srv/tblogs/server/install.sh'
+export TBLOGS_CONTENT_DIR=~/nuts/markdown/blog    # 你的 Markdown 目录
+export TBLOGS_DIST=~/tblogs-dist                  # 构建产物放哪
+export TBLOGS_SITE_URL=https://blog.example.com   # 绝对地址，RSS 用
+export TBLOGS_SITE_TITLE=我的技术笔记
+export TBLOGS_DOMAIN=blog.example.com             # bundle 渲染配置用
+export TBLOGS_TARGET=user@server:/srv/tblogs      # publish 的目标
 ```
 
-之后每次写文章只要 `build` + `publish`；服务器会自己发现新的内容包并重新加载，
-**不需要重启**。
+> 构建产物**不要**放在内容目录里，否则每次构建都会同步进坚果云。它是可再生的，
+> 放在内容目录外面就好。
 
----
+### 写作
+
+```bash
+tblogs-admin preview
+```
+
+打开 <http://127.0.0.1:8080>，用 Typora 写，**保存即生效**：客户端监听目录并重建，
+服务端发现新内容包后自己重载，两边都不需要重启。
+
+### 发布
+
+```bash
+tblogs-admin build && tblogs-admin bundle && tblogs-admin publish
+```
+
+- `build` — 目录 → `site.db` + `media/`
+- `bundle` — 再加上服务端二进制、systemd 单元、nginx/Caddy、DDNS 脚本
+- `publish` — 一次 rsync 推上去；服务端约 5 秒内自动重载
+
+发布前可以先 `tblogs-admin doctor` 自检（目录、依赖工具、SSH 连通性）。
+
+### 首次部署（只做一次）
+
+```bash
+# 在服务器上装一次，之后每次发布都不用再碰服务器
+ssh user@server 'sudo bash /srv/tblogs/server/install.sh'
+
+# 反向代理 + HTTPS，二选一
+ssh user@server 'sudo cp /srv/tblogs/server/Caddyfile /etc/caddy/Caddyfile'   # 自动申请证书
+ssh user@server 'sudo cp /srv/tblogs/server/nginx.conf /etc/nginx/sites-available/tblogs'
+ssh user@server 'sudo certbot --nginx -d blog.example.com'
+
+# 判断这台机器能不能被公网访问（重点看 IPv6）
+ssh user@server 'sudo bash /srv/tblogs/server/check-exposure.sh'
+```
+
+网络、DDNS 与隧道的详细说明见 [`deploy/README.md`](deploy/README.md)。
 
 ## 管理端命令
 
