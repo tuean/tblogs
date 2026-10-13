@@ -1,0 +1,20 @@
+[Unit]
+Description=Run the tblogs DDNS updater every 5 minutes
+
+[Timer]
+# Run shortly after boot, then every 5 minutes.
+OnBootSec=1min
+OnUnitActiveSec=5min
+
+# Spread the wakeup so a fleet of hosts does not hit the API in lockstep.
+AccuracySec=30s
+RandomizedDelaySec=30s
+
+# Do not try to catch up on runs missed while the host was off; the next run
+# reads the current address anyway.
+Persistent=false
+
+Unit=ddns.service
+
+[Install]
+WantedBy=timers.target

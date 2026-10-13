@@ -1,0 +1,19 @@
+[Unit]
+Description=Update the Cloudflare DNS record for this host
+Documentation=file:/opt/tblogs/deploy/README.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+
+# Holds CF_API_TOKEN / CF_ZONE_ID / CF_RECORD_NAME. Keep it at mode 0600.
+EnvironmentFile=/etc/tblogs-ddns.env
+
+ExecStart=/opt/tblogs/deploy/ddns-update.sh
+
+# The script only needs to read its config and talk HTTPS.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true

@@ -1,0 +1,17 @@
+{% extends "base.html" %}
+
+{% block title %}{{ post.title }} · {{ site_title }}{% endblock %}
+
+{% block content %}
+<article>
+  <header>
+    <h1>{{ post.title }}</h1>
+    <p class="post-meta">
+      {{ post.date }}
+      {% for tag in post.tags %} · <a class="tag" href="/tags/{{ tag.slug|urlencode }}">{{ tag.name }}</a>{% endfor %}
+    </p>
+  </header>
+  {# body_html is produced by our own Markdown renderer; see markdown.rs. #}
+  <div class="prose">{{ post.body_html|safe }}</div>
+</article>
+{% endblock %}

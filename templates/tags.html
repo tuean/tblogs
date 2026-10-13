@@ -1,0 +1,17 @@
+{% extends "base.html" %}
+
+{% block title %}标签 · {{ site_title }}{% endblock %}
+
+{% block content %}
+<h1>标签</h1>
+
+{% if tags.is_empty() %}
+<p class="empty">还没有标签。</p>
+{% else %}
+<p class="tag-cloud">
+{% for tag in tags %}
+  <a class="tag" href="/tags/{{ tag.slug|urlencode }}">{{ tag.name }} ({{ tag.count }})</a>
+{% endfor %}
+</p>
+{% endif %}
+{% endblock %}

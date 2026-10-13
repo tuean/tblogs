@@ -1,0 +1,31 @@
+# Cloudflare Tunnel — expose a local tblogs instance without a public IP,
+# without port forwarding, and without opening any inbound firewall port.
+#
+# The daemon dials out to Cloudflare, which routes blog.example.com back down
+# that connection. This is the workable option when the machine sits behind
+# carrier-grade NAT or a firewall you do not control.
+#
+# Setup:
+#   cloudflared tunnel login
+#   cloudflared tunnel create tblogs
+#   cloudflared tunnel route dns tblogs blog.example.com
+#   cloudflared tunnel --config deploy/cloudflared-config.yml run tblogs
+#
+# Note this solves reachability, not policy: serving from a machine you do not
+# own may still breach your organisation's security rules.
+
+tunnel: tblogs
+
+# Written by `cloudflared tunnel create`. Adjust the path and UUID.
+credentials-file: /home/you/.cloudflared/00000000-0000-0000-0000-000000000000.json
+
+ingress:
+  - hostname: blog.example.com
+    service: http://127.0.0.1:8080
+    originRequest:
+      connectTimeout: 10s
+      # The blog is read-mostly; no need for long-lived origin connections.
+      keepAliveTimeout: 30s
+
+  # Anything not matched above gets a 404 rather than leaking between services.
+  - service: http_status:404

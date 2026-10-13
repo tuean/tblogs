@@ -1,0 +1,46 @@
+[Unit]
+Description=tblogs — Rust blog server (axum + SQLite)
+Documentation=https://github.com/your-account/tblogs
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=tblogs
+Group=tblogs
+WorkingDirectory=/opt/tblogs
+
+# Defaults. The admin token belongs in /etc/tblogs.env (mode 0600), not here,
+# so that it does not end up in world-readable unit files.
+Environment=TBLOGS_DATABASE_URL=sqlite:///var/lib/tblogs/tblogs.db
+Environment=TBLOGS_SITE_URL=https://blog.example.com
+Environment=TBLOGS_SITE_TITLE=我的博客
+Environment=RUST_LOG=tblogs=info,tower_http=warn
+
+# Bind to loopback only: nginx/Caddy terminates TLS and proxies to this port.
+# Never use 0.0.0.0 here unless you really intend to bypass the proxy.
+Environment=TBLOGS_BIND=127.0.0.1:8080
+
+# TBLOGS_ADMIN_TOKEN=... lives here. Overrides the values above.
+EnvironmentFile=-/etc/tblogs.env
+
+ExecStart=/opt/tblogs/tblogs
+Restart=on-failure
+RestartSec=2s
+
+# Hardening. The service only needs its data directory writable.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+ReadWritePaths=/var/lib/tblogs
+
+[Install]
+WantedBy=multi-user.target

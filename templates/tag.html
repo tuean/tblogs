@@ -1,0 +1,23 @@
+{% extends "base.html" %}
+
+{% block title %}标签：{{ tag_name }} · {{ site_title }}{% endblock %}
+
+{% block content %}
+<h1>标签：{{ tag_name }}</h1>
+<p class="post-meta"><a href="/tags">← 所有标签</a></p>
+
+{% if posts.is_empty() %}
+<p class="empty">该标签下还没有已发布的文章。</p>
+{% else %}
+<ul class="post-list">
+{% for post in posts %}
+  <li>
+    <h2><a href="/posts/{{ post.slug|urlencode }}">{{ post.title }}</a></h2>
+    <p class="post-meta">{{ post.date }}</p>
+    {% if !post.summary.is_empty() %}<p class="post-summary">{{ post.summary }}</p>{% endif %}
+  </li>
+{% endfor %}
+</ul>
+{% include "_pager.html" %}
+{% endif %}
+{% endblock %}

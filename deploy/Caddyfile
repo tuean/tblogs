@@ -1,0 +1,46 @@
+# tblogs — Caddy variant of deploy/nginx.conf.
+#
+# Caddy obtains and renews TLS certificates on its own, so there is no certbot
+# step and no certificate paths to maintain.
+#
+#   sudo cp deploy/Caddyfile /etc/caddy/Caddyfile
+#   sudo systemctl reload caddy
+#
+# Replace blog.example.com, and keep TBLOGS_BIND on 127.0.0.1.
+
+blog.example.com {
+	encode gzip
+
+	header {
+		Strict-Transport-Security "max-age=31536000"
+		X-Content-Type-Options    "nosniff"
+		X-Frame-Options           "DENY"
+		Referrer-Policy           "strict-origin-when-cross-origin"
+		-Server
+	}
+
+	# Rate limit the login endpoint.
+	#
+	# NOTE: `rate_limit` comes from the caddy-ratelimit plugin and is NOT part
+	# of the stock Caddy build. Either build Caddy with
+	#   xcaddy build --with github.com/mholt/caddy-ratelimit
+	# or delete this block. The official Docker image does not include it.
+	@login path /admin/login
+	handle @login {
+		rate_limit {
+			zone login {
+				key    {remote_host}
+				events 5
+				window 1m
+			}
+		}
+		reverse_proxy 127.0.0.1:8080
+	}
+
+	handle /static/* {
+		header Cache-Control "public, max-age=604800, immutable"
+		reverse_proxy 127.0.0.1:8080
+	}
+
+	reverse_proxy 127.0.0.1:8080
+}

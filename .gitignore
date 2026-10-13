@@ -1,0 +1,13 @@
+# Build output
+/target
+
+# Runtime data: the SQLite database and its write-ahead log. Never commit
+# these — they contain the blog content and, potentially, private drafts.
+/data
+*.db
+*.db-wal
+*.db-shm
+
+# Local secrets (TBLOGS_ADMIN_TOKEN, Cloudflare credentials)
+.env
+*.env

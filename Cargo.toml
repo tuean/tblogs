@@ -1,0 +1,17 @@
+[package]
+name = "tblogs"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow = "1.0.104"
+askama = "0.16.1"
+axum = "0.8.9"
+chrono = { version = "0.4.45", features = ["serde"] }
+pulldown-cmark = "0.13.4"
+serde = { version = "1.0.229", features = ["derive"] }
+sqlx = { version = "0.9.0", default-features = false, features = ["runtime-tokio", "sqlite", "chrono", "migrate"] }
+tokio = { version = "1.53.2", features = ["full"] }
+tower-http = { version = "0.7.1", features = ["trace"] }
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }

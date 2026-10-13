@@ -1,0 +1,9 @@
+{# Shared pagination control. Expects: total_pages, page, has_prev, has_next,
+   prev_href, next_href — all precomputed by util::paginate. #}
+{% if total_pages > 1 %}
+<nav class="pager">
+  {% if has_prev %}<a class="btn btn-secondary" href="{{ prev_href }}">← 上一页</a>{% endif %}
+  <span class="post-meta">第 {{ page }} / {{ total_pages }} 页</span>
+  {% if has_next %}<a class="btn btn-secondary" href="{{ next_href }}">下一页 →</a>{% endif %}
+</nav>
+{% endif %}
