@@ -4,12 +4,13 @@ use std::collections::HashMap;
 
 use axum::{
     extract::{Path, Query, State},
-    http::header,
-    response::{Html, IntoResponse},
+    http::{HeaderMap, StatusCode, header},
+    response::{Html, IntoResponse, Response},
 };
 use serde::Deserialize;
 
 use crate::{
+    assets::Assets,
     db,
     error::AppError,
     markdown,
@@ -39,7 +40,7 @@ pub async fn index(
 
     let posts = posts
         .into_iter()
-        .map(|post| to_view(post, &tag_map, false))
+        .map(|post| to_view(post, &tag_map, false, None))
         .collect();
 
     super::render(&IndexTemplate {
@@ -69,7 +70,7 @@ pub async fn post_detail(
     super::render(&PostTemplate {
         site_title: state.cfg.site_title.clone(),
         site_description: state.cfg.site_description.clone(),
-        post: to_view(post, &tag_map, true),
+        post: to_view(post, &tag_map, true, state.assets.as_ref()),
     })
 }
 
@@ -108,7 +109,7 @@ pub async fn tag_detail(
 
     let posts = posts
         .into_iter()
-        .map(|post| to_view(post, &tag_map, false))
+        .map(|post| to_view(post, &tag_map, false, None))
         .collect();
 
     super::render(&TagTemplate {
@@ -147,19 +148,102 @@ pub async fn stylesheet() -> impl IntoResponse {
     )
 }
 
+/// Serve an image or other asset out of the content directory.
+///
+/// Reachable only through [`Assets::path_for`], which rejects traversal, symlink
+/// escapes, dotfiles and any extension outside the allowlist — so the Markdown
+/// sources sitting in the same tree stay private.
+pub async fn media(
+    State(state): State<AppState>,
+    Path(path): Path<String>,
+    headers: HeaderMap,
+) -> Result<Response, AppError> {
+    let Some(assets) = state.assets.as_ref() else {
+        return Err(AppError::not_found("本站未配置内容目录，图片资源不可用"));
+    };
+
+    let Some(file) = assets.path_for(&path) else {
+        return Err(AppError::not_found("资源不存在"));
+    };
+
+    let Some(content_type) = crate::assets::content_type(&file) else {
+        return Err(AppError::not_found("资源不存在"));
+    };
+
+    let metadata = tokio::fs::metadata(&file)
+        .await
+        .map_err(|error| AppError::internal("读取资源失败", error))?;
+
+    // A cheap validator, so a browser can revalidate an edited image instead of
+    // trusting a long max-age.
+    let stamp = metadata
+        .modified()
+        .ok()
+        .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|delta| delta.as_nanos())
+        .unwrap_or(0);
+    let etag = format!("\"{:x}-{:x}\"", metadata.len(), stamp);
+
+    if headers
+        .get(header::IF_NONE_MATCH)
+        .and_then(|value| value.to_str().ok())
+        == Some(etag.as_str())
+    {
+        return Ok((StatusCode::NOT_MODIFIED, [(header::ETAG, etag)]).into_response());
+    }
+
+    let bytes = tokio::fs::read(&file)
+        .await
+        .map_err(|error| AppError::internal("读取资源失败", error))?;
+
+    Ok((
+        [
+            (header::CONTENT_TYPE, content_type.to_string()),
+            (header::CACHE_CONTROL, "public, max-age=600".to_string()),
+            (header::ETAG, etag),
+            (header::X_CONTENT_TYPE_OPTIONS, "nosniff".to_string()),
+            // An SVG is a document that can carry script. Serving content from
+            // the author's own directory under the site's origin would let it
+            // run there, so scripts are sandboxed away.
+            (
+                header::CONTENT_SECURITY_POLICY,
+                "default-src 'none'; sandbox".to_string(),
+            ),
+        ],
+        bytes,
+    )
+        .into_response())
+}
+
 /// Build a render-ready post.
 ///
 /// `with_body` controls whether the Markdown body is rendered. List pages show
 /// only the stored summary, so rendering every body there would be wasted
 /// work; those views carry an empty `body_html` that their templates never
 /// reference.
-fn to_view(post: Post, tags: &HashMap<i64, Vec<Tag>>, with_body: bool) -> PostView {
+///
+/// When `assets` is present and the post came from a file, local image
+/// references are repointed at `/media/...` so they resolve from the article
+/// URL rather than from the directory the file happens to live in.
+fn to_view(
+    post: Post,
+    tags: &HashMap<i64, Vec<Tag>>,
+    with_body: bool,
+    assets: Option<&Assets>,
+) -> PostView {
     let date = post.display_date();
-    let body_html = if with_body {
-        markdown::render(&post.body_md)
-    } else {
+
+    let body_html = if !with_body {
         String::new()
+    } else {
+        match (assets, post.source_path.as_deref()) {
+            (Some(assets), Some(source_rel)) => {
+                markdown::render_with_assets(&post.body_md, assets, source_rel)
+            }
+            _ => markdown::render(&post.body_md),
+        }
     };
+
     let tags = tags.get(&post.id).cloned().unwrap_or_default();
 
     PostView {

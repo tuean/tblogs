@@ -32,6 +32,10 @@ pub fn router(state: AppState) -> Router {
         // The stylesheet is embedded in the binary at compile time, so there is
         // no asset tree to deploy and no build-machine path to resolve.
         .route("/static/style.css", get(public::stylesheet))
+        // Images and other assets from the content directory. The wildcard is
+        // required because a Markdown file may reference a nested folder such
+        // as `assets/diagram/flow.png`.
+        .route("/media/{*path}", get(public::media))
         // Admin surface. Every mutation is a POST because HTML forms cannot
         // issue PUT or DELETE.
         .route("/admin", get(admin::list))
@@ -44,6 +48,7 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/admin/posts/{id}/delete", post(admin::delete))
         .route("/admin/posts/{id}/publish", post(admin::toggle_publish))
+        .route("/admin/sync", post(admin::resync))
         .layer(TraceLayer::new_for_http())
         .with_state(state)
 }

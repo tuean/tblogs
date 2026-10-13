@@ -67,6 +67,13 @@ pub struct AdminPostRow {
     pub published: bool,
     pub date: String,
     pub tags: Vec<Tag>,
+    /// False when the post is owned by a file on disk, in which case the web
+    /// admin shows it as read-only rather than offering controls that the next
+    /// sync would undo.
+    pub editable: bool,
+    /// Where the post comes from: the source file path, or a label for a post
+    /// created in the web admin.
+    pub source_label: String,
 }
 
 #[derive(Template)]
@@ -77,6 +84,10 @@ pub struct AdminListTemplate {
     pub posts: Vec<AdminPostRow>,
     /// Whether the admin surface is behind a token, shown as a hint.
     pub gated: bool,
+    /// Result of the most recent sync, when one was just requested.
+    pub notice: String,
+    /// The configured content directory, empty when file-backed mode is off.
+    pub content_dir: String,
 }
 
 #[derive(Template)]

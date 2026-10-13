@@ -21,6 +21,16 @@ Environment=RUST_LOG=tblogs=info,tower_http=warn
 # Never use 0.0.0.0 here unless you really intend to bypass the proxy.
 Environment=TBLOGS_BIND=127.0.0.1:8080
 
+# File-backed authoring. Uncomment and point at the directory of Markdown files
+# to make those files the source of truth for their articles. The directory is
+# only ever read; drafts live on this disk too, so place it deliberately.
+#
+# Keep it OUTSIDE /home: ProtectHome=true below makes /home, /root and
+# /run/user inaccessible to the service, so a content directory there would be
+# unreadable and the service would fail to start.
+# Environment=TBLOGS_CONTENT_DIR=/var/lib/tblogs/content
+# Environment=TBLOGS_SYNC_INTERVAL=5
+
 # TBLOGS_ADMIN_TOKEN=... lives here. Overrides the values above.
 EnvironmentFile=-/etc/tblogs.env
 

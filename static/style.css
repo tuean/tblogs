@@ -310,6 +310,11 @@ table.admin form { margin: 0; }
 
 .narrow { max-width: 22rem; }
 
+/* A form that should read as part of a sentence inside a notice. */
+.inline-form { display: inline; }
+
+.inline-form button { margin-left: 0.5rem; }
+
 .tag-cloud { line-height: 2.1; }
 
 .tag-cloud .tag { margin-right: 0.35rem; }

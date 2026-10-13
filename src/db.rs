@@ -20,14 +20,15 @@ use sqlx::{
 use crate::{
     config::Config,
     markdown,
-    models::{Post, PostForm, Tag, TagCount},
+    models::{Post, PostForm, SourcedPost, Tag, TagCount},
     slug,
 };
 
 /// The `posts` column list, shared by every query that decodes a whole row.
 macro_rules! post_columns {
     () => {
-        "id, slug, title, summary, body_md, published, created_at, updated_at, published_at"
+        "id, slug, title, summary, body_md, published, created_at, updated_at, \
+         published_at, source_path"
     };
 }
 
@@ -38,7 +39,7 @@ macro_rules! post_columns {
 macro_rules! post_columns_p {
     () => {
         "p.id, p.slug, p.title, p.summary, p.body_md, p.published, \
-         p.created_at, p.updated_at, p.published_at"
+         p.created_at, p.updated_at, p.published_at, p.source_path"
     };
 }
 
@@ -80,7 +81,7 @@ pub async fn init(cfg: &Config) -> Result<SqlitePool> {
 /// The migration directory is resolved at runtime with `Migrator::new` rather
 /// than through the `sqlx::migrate!` macro, so the sqlx-macros proc macro is
 /// not needed at all. See the note on `FromRow` in `models.rs`.
-async fn apply_migrations(pool: &SqlitePool) -> Result<()> {
+pub(crate) async fn apply_migrations(pool: &SqlitePool) -> Result<()> {
     let dir = migrations_dir()?;
 
     let migrator = sqlx::migrate::Migrator::new(dir.as_path())
@@ -450,6 +451,144 @@ pub async fn delete_post(pool: &SqlitePool, id: i64) -> Result<()> {
 
     tx.commit().await?;
     Ok(())
+}
+
+// ------------------------------------------------------- file-backed posts
+
+/// What a sync pass did to one post.
+///
+/// There is no `Unchanged` case: a file whose modification time still matches
+/// is skipped before this is ever called.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SyncOutcome {
+    Created,
+    Updated,
+}
+
+/// Insert or update the post backed by a particular source file.
+///
+/// The file is authoritative: title, body, tags, slug and publication state are
+/// all taken from it. Only `created_at` and an already-set `published_at` are
+/// preserved, so editing a file does not shuffle it to the top of the feed.
+pub async fn sync_sourced_post(pool: &SqlitePool, input: &SourcedPost) -> Result<SyncOutcome> {
+    let existing = find_by_source(pool, &input.source_path).await?;
+    let exclude = existing.as_ref().map(|post| post.id);
+
+    let slug = unique_post_slug(pool, &input.slug_base, exclude).await?;
+    let now = now_iso();
+
+    let published_at = if input.published {
+        existing
+            .as_ref()
+            .and_then(|post| post.published_at.clone())
+            .or_else(|| input.date_hint.clone())
+            .or_else(|| Some(now.clone()))
+    } else {
+        None
+    };
+
+    let created_at = existing
+        .as_ref()
+        .map(|post| post.created_at.clone())
+        .or_else(|| input.date_hint.clone())
+        .unwrap_or_else(|| now.clone());
+
+    let mut tx = pool.begin().await?;
+
+    let id = match &existing {
+        Some(post) => {
+            sqlx::query(
+                "UPDATE posts
+                    SET slug = ?, title = ?, summary = ?, body_md = ?, published = ?,
+                        created_at = ?, updated_at = ?, published_at = ?,
+                        source_mtime = ?
+                  WHERE id = ?",
+            )
+            .bind(&slug)
+            .bind(&input.title)
+            .bind(&input.summary)
+            .bind(&input.body_md)
+            .bind(input.published)
+            .bind(&created_at)
+            .bind(&input.updated_at)
+            .bind(&published_at)
+            .bind(input.source_mtime)
+            .bind(post.id)
+            .execute(&mut *tx)
+            .await?;
+
+            post.id
+        }
+        None => {
+            let result = sqlx::query(
+                "INSERT INTO posts
+                     (slug, title, summary, body_md, published, created_at, updated_at,
+                      published_at, source_path, source_mtime)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            )
+            .bind(&slug)
+            .bind(&input.title)
+            .bind(&input.summary)
+            .bind(&input.body_md)
+            .bind(input.published)
+            .bind(&created_at)
+            .bind(&input.updated_at)
+            .bind(&published_at)
+            .bind(&input.source_path)
+            .bind(input.source_mtime)
+            .execute(&mut *tx)
+            .await?;
+
+            result.last_insert_rowid()
+        }
+    };
+
+    sync_tags(&mut tx, id, &input.tags).await?;
+    tx.commit().await?;
+
+    Ok(match existing {
+        Some(_) => SyncOutcome::Updated,
+        None => SyncOutcome::Created,
+    })
+}
+
+/// The post backed by a given source file, if it has been imported.
+pub async fn find_by_source(pool: &SqlitePool, source_path: &str) -> Result<Option<Post>> {
+    let row = sqlx::query_as::<_, Post>(concat!(
+        "SELECT ",
+        post_columns!(),
+        " FROM posts WHERE source_path = ?"
+    ))
+    .bind(source_path)
+    .fetch_optional(pool)
+    .await?;
+
+    Ok(row)
+}
+
+/// `(source_path, source_mtime)` for every imported post.
+///
+/// Used to skip files whose modification time has not changed.
+pub async fn list_source_mtimes(pool: &SqlitePool) -> Result<Vec<(String, i64)>> {
+    let rows: Vec<(String, Option<i64>)> =
+        sqlx::query_as("SELECT source_path, source_mtime FROM posts WHERE source_path IS NOT NULL")
+            .fetch_all(pool)
+            .await?;
+
+    Ok(rows
+        .into_iter()
+        .map(|(path, mtime)| (path, mtime.unwrap_or(0)))
+        .collect())
+}
+
+/// `(id, source_path)` for every imported post.
+pub async fn list_sourced_posts(pool: &SqlitePool) -> Result<Vec<(i64, String)>> {
+    let rows: Vec<(i64, String)> =
+        sqlx::query_as("SELECT id, source_path FROM posts WHERE source_path IS NOT NULL")
+            .fetch_all(pool)
+            .await?;
+
+    Ok(rows)
 }
 
 /// Summary to store: the author's own text, or one derived from the body.

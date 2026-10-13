@@ -1,6 +1,6 @@
 //! Runtime configuration, read from the environment.
 
-use std::{env, net::SocketAddr};
+use std::{env, net::SocketAddr, path::PathBuf, time::Duration};
 
 use anyhow::{Context, Result};
 
@@ -33,6 +33,15 @@ pub struct Config {
 
     /// Insert demo posts when the database is empty.
     pub seed_demo: bool,
+
+    /// Directory of Markdown files whose contents become posts.
+    ///
+    /// `None` disables the whole file-backed mode and leaves the web editor as
+    /// the only way to author.
+    pub content_dir: Option<PathBuf>,
+
+    /// How often to re-scan the content directory for changes.
+    pub sync_interval: Duration,
 }
 
 impl Config {
@@ -51,6 +60,19 @@ impl Config {
             .context("TBLOGS_PAGE_SIZE must be a positive integer")?
             .max(1);
 
+        // An empty value means "not configured" rather than "the current
+        // directory", which would otherwise import whatever happens to be in
+        // the working directory.
+        let content_dir = env::var("TBLOGS_CONTENT_DIR")
+            .ok()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+            .map(PathBuf::from);
+
+        let sync_secs: u64 = env_or("TBLOGS_SYNC_INTERVAL", "5")
+            .parse::<u64>()
+            .context("TBLOGS_SYNC_INTERVAL must be a whole number of seconds")?;
+
         Ok(Self {
             bind,
             database_url: env_or("TBLOGS_DATABASE_URL", "sqlite://data/tblogs.db"),
@@ -62,6 +84,8 @@ impl Config {
             admin_token,
             page_size,
             seed_demo: env_flag("TBLOGS_SEED_DEMO"),
+            content_dir,
+            sync_interval: Duration::from_secs(sync_secs),
         })
     }
 

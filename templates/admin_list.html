@@ -6,12 +6,31 @@
 <div class="btn-row admin-head">
   <h1>文章管理</h1>
   <div class="btn-row">
-    <a class="btn" href="/admin/new">新建文章</a>
+    <a class="btn" href="/admin/new">网页新建</a>
     <form method="post" action="/admin/logout">
       <button class="btn btn-secondary" type="submit">退出登录</button>
     </form>
   </div>
 </div>
+
+{% if !notice.is_empty() %}
+<div class="notice">{{ notice }}</div>
+{% endif %}
+
+{% if !content_dir.is_empty() %}
+<div class="notice">
+  正在同步目录 <code>{{ content_dir }}</code>。
+  这些文章的正文由文件决定，网页端只读——请在编辑器里修改。
+  <form method="post" action="/admin/sync" class="inline-form">
+    <button class="btn btn-secondary" type="submit">立即重新同步</button>
+  </form>
+</div>
+{% else %}
+<div class="notice">
+  未配置 <code>TBLOGS_CONTENT_DIR</code>，当前只能在网页端写作。
+  设置该变量后会从指定目录导入 Markdown 文件。
+</div>
+{% endif %}
 
 {% if !gated %}
 <div class="notice">
@@ -20,11 +39,11 @@
 {% endif %}
 
 {% if posts.is_empty() %}
-<p class="empty">还没有文章。<a href="/admin/new">写第一篇</a></p>
+<p class="empty">还没有文章。<a href="/admin/new">写第一篇</a>，或配置内容目录后同步本地 Markdown。</p>
 {% else %}
 <table class="admin">
   <thead>
-    <tr><th>标题</th><th>状态</th><th>标签</th><th>更新</th><th>操作</th></tr>
+    <tr><th>标题</th><th>状态</th><th>来源</th><th>标签</th><th>更新</th><th>操作</th></tr>
   </thead>
   <tbody>
   {% for post in posts %}
@@ -41,23 +60,34 @@
         {% if post.published %}<span class="badge badge-live">已发布</span>
         {% else %}<span class="badge">草稿</span>{% endif %}
       </td>
+      <td class="post-meta">
+        {% if post.editable %}
+          网页创建
+        {% else %}
+          <code>{{ post.source_label }}</code>
+        {% endif %}
+      </td>
       <td>
         {% for tag in post.tags %}<a class="tag" href="/tags/{{ tag.slug|urlencode }}">{{ tag.name }}</a>{% endfor %}
       </td>
       <td class="post-meta">{{ post.date }}</td>
       <td>
-        <div class="btn-row">
-          <a class="btn btn-secondary" href="/admin/posts/{{ post.id }}/edit">编辑</a>
-          <form method="post" action="/admin/posts/{{ post.id }}/publish">
-            <button class="btn btn-secondary" type="submit">
-              {% if post.published %}转为草稿{% else %}发布{% endif %}
-            </button>
-          </form>
-          <form method="post" action="/admin/posts/{{ post.id }}/delete"
-                onsubmit="return confirm('确定删除这篇文章吗？此操作不可撤销。')">
-            <button class="btn btn-danger" type="submit">删除</button>
-          </form>
-        </div>
+        {% if post.editable %}
+          <div class="btn-row">
+            <a class="btn btn-secondary" href="/admin/posts/{{ post.id }}/edit">编辑</a>
+            <form method="post" action="/admin/posts/{{ post.id }}/publish">
+              <button class="btn btn-secondary" type="submit">
+                {% if post.published %}转为草稿{% else %}发布{% endif %}
+              </button>
+            </form>
+            <form method="post" action="/admin/posts/{{ post.id }}/delete"
+                  onsubmit="return confirm('确定删除这篇文章吗？此操作不可撤销。')">
+              <button class="btn btn-danger" type="submit">删除</button>
+            </form>
+          </div>
+        {% else %}
+          <span class="post-meta">由文件管理，在编辑器中修改</span>
+        {% endif %}
       </td>
     </tr>
   {% endfor %}

@@ -4,16 +4,16 @@
 //! redirects to the login form when a token is configured and not presented.
 
 use axum::{
-    extract::{Form, Path, State},
+    extract::{Form, Path, Query, State},
     http::{StatusCode, header},
     response::{Html, IntoResponse, Redirect, Response},
 };
 use serde::Deserialize;
 
 use crate::{
-    auth, db,
+    auth, content, db,
     error::AppError,
-    models::{PostForm, PostFormView},
+    models::{Post, PostForm, PostFormView},
     state::AppState,
     templates::{AdminFormTemplate, AdminListTemplate, AdminLoginTemplate, AdminPostRow},
 };
@@ -25,8 +25,19 @@ pub struct LoginForm {
     pub token: String,
 }
 
+/// Query string of the admin list, used to report the result of a sync.
+#[derive(Debug, Default, Deserialize)]
+pub struct AdminQuery {
+    #[serde(default)]
+    pub sync: Option<String>,
+}
+
 /// All posts, drafts included.
-pub async fn list(_: auth::Admin, State(state): State<AppState>) -> Result<Html<String>, AppError> {
+pub async fn list(
+    _: auth::Admin,
+    State(state): State<AppState>,
+    Query(query): Query<AdminQuery>,
+) -> Result<Html<String>, AppError> {
     let posts = db::list_all(&state.pool).await?;
     let tag_map = db::tags_by_post(&state.pool).await?;
 
@@ -35,6 +46,13 @@ pub async fn list(_: auth::Admin, State(state): State<AppState>) -> Result<Html<
         .map(|post| {
             let date = post.display_date();
             let tags = tag_map.get(&post.id).cloned().unwrap_or_default();
+            // Read what is needed from the row before its fields are moved out.
+            let source_label = match &post.source_path {
+                Some(path) => path.clone(),
+                None => "网页创建".to_string(),
+            };
+            let editable = !post.is_file_backed();
+
             AdminPostRow {
                 id: post.id,
                 title: post.title,
@@ -42,16 +60,71 @@ pub async fn list(_: auth::Admin, State(state): State<AppState>) -> Result<Html<
                 published: post.published,
                 date,
                 tags,
+                editable,
+                source_label,
             }
         })
         .collect();
+
+    let notice = query
+        .sync
+        .as_deref()
+        .and_then(content::SyncReport::from_query)
+        .map(|report| {
+            format!(
+                "同步完成：新增 {} 篇，更新 {} 篇，移除 {} 篇，未变化 {} 篇。",
+                report.created, report.updated, report.removed, report.unchanged
+            )
+        })
+        .unwrap_or_default();
 
     super::render(&AdminListTemplate {
         site_title: state.cfg.site_title.clone(),
         site_description: state.cfg.site_description.clone(),
         posts: rows,
         gated: state.cfg.admin_is_gated(),
+        notice,
+        content_dir: state
+            .cfg
+            .content_dir
+            .as_ref()
+            .map(|dir| dir.display().to_string())
+            .unwrap_or_default(),
     })
+}
+
+/// Re-scan the content directory on demand.
+///
+/// The background watcher does this automatically; the button exists so an
+/// author does not have to wait for the next poll, and so the result is
+/// visible.
+pub async fn resync(_: auth::Admin, State(state): State<AppState>) -> Result<Response, AppError> {
+    let Some(root) = state.cfg.content_dir.clone() else {
+        return Err(AppError::conflict(
+            "未配置 TBLOGS_CONTENT_DIR，没有可同步的目录。",
+        ));
+    };
+
+    let files = content::scan(&root)?;
+    let report = content::sync(&state.pool, &root, &files).await?;
+
+    tracing::info!(report = %report.summary(), "manual sync finished");
+
+    Ok(Redirect::to(&format!("/admin?sync={}", report.to_query())).into_response())
+}
+
+/// Refuse to mutate a post whose content is owned by a file on disk.
+///
+/// Without this the change would silently vanish: the next sync rewrites the
+/// row from the file, and a deleted post would simply reappear.
+fn ensure_editable(post: &Post) -> Result<(), AppError> {
+    match &post.source_path {
+        Some(source) => Err(AppError::conflict(format!(
+            "这篇文章由文件 `{source}` 管理，请在编辑器中修改它。\
+             网页端只能编辑和删除在此处创建的文章。"
+        ))),
+        None => Ok(()),
+    }
 }
 
 /// Blank create form.
@@ -103,6 +176,8 @@ pub async fn edit_form(
         .await?
         .ok_or_else(|| AppError::not_found("文章不存在"))?;
 
+    ensure_editable(&post)?;
+
     let tag_map = db::tags_by_post(&state.pool).await?;
     let tags = tag_map
         .get(&post.id)
@@ -139,9 +214,11 @@ pub async fn update(
 ) -> Result<Response, AppError> {
     // Check existence up front so a stale form reports 404 rather than
     // surfacing as a generic failure from the update itself.
-    db::find_by_id(&state.pool, id)
+    let existing = db::find_by_id(&state.pool, id)
         .await?
         .ok_or_else(|| AppError::not_found("文章不存在"))?;
+
+    ensure_editable(&existing)?;
 
     if form.title.trim().is_empty() {
         return Ok(super::render(&AdminFormTemplate {
@@ -169,6 +246,8 @@ pub async fn toggle_publish(
         .await?
         .ok_or_else(|| AppError::not_found("文章不存在"))?;
 
+    ensure_editable(&post)?;
+
     db::set_published(&state.pool, id, !post.published).await?;
     Ok(Redirect::to("/admin").into_response())
 }
@@ -179,6 +258,12 @@ pub async fn delete(
     State(state): State<AppState>,
     Path(id): Path<i64>,
 ) -> Result<Response, AppError> {
+    let post = db::find_by_id(&state.pool, id)
+        .await?
+        .ok_or_else(|| AppError::not_found("文章不存在"))?;
+
+    ensure_editable(&post)?;
+
     db::delete_post(&state.pool, id).await?;
     Ok(Redirect::to("/admin").into_response())
 }

@@ -29,6 +29,12 @@ impl AppError {
         Self::new(StatusCode::NOT_FOUND, message)
     }
 
+    /// The request conflicts with how the resource is managed — for example
+    /// editing a post that is owned by a file on disk.
+    pub fn conflict(message: impl Into<String>) -> Self {
+        Self::new(StatusCode::CONFLICT, message)
+    }
+
     /// Wrap an internal failure, keeping its chain for the log only.
     pub fn internal(message: impl Into<String>, error: impl std::fmt::Display) -> Self {
         Self {

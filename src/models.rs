@@ -19,6 +19,12 @@ pub struct Post {
     pub created_at: String,
     pub updated_at: String,
     pub published_at: Option<String>,
+    /// Path relative to the content directory when this post came from a
+    /// Markdown file on disk. `None` for posts created in the web admin.
+    ///
+    /// The file's modification time is used for change detection, but only by
+    /// the sync job's own query, so it is not carried on this struct.
+    pub source_path: Option<String>,
 }
 
 impl Post {
@@ -29,7 +35,15 @@ impl Post {
             .published_at
             .as_deref()
             .unwrap_or(self.updated_at.as_str());
-        raw.chars().take(10).collect()
+        format_local_date(raw)
+    }
+
+    /// Whether the post is owned by a file on disk.
+    ///
+    /// A file-backed post must not be edited or deleted through the web admin:
+    /// the next sync would either overwrite the change or resurrect the post.
+    pub fn is_file_backed(&self) -> bool {
+        self.source_path.is_some()
     }
 }
 
@@ -50,8 +64,48 @@ impl<'r> sqlx::FromRow<'r, SqliteRow> for Post {
             created_at: row.try_get("created_at")?,
             updated_at: row.try_get("updated_at")?,
             published_at: row.try_get("published_at")?,
+            source_path: row.try_get("source_path")?,
         })
     }
+}
+
+/// A post derived from one Markdown file, ready to be written to the database.
+///
+/// Slug uniqueness is resolved by the database layer, so `slug_base` is only a
+/// starting point.
+#[derive(Debug, Clone)]
+pub struct SourcedPost {
+    /// Path relative to the content directory, with `/` separators.
+    pub source_path: String,
+    /// Modification time of the file, in nanoseconds since the epoch.
+    pub source_mtime: i64,
+    pub title: String,
+    pub slug_base: String,
+    pub summary: String,
+    pub body_md: String,
+    pub published: bool,
+    /// Publication date from front matter or a `YYYY-MM-DD-` file name prefix.
+    pub date_hint: Option<String>,
+    /// The file's modification time as an ISO-8601 string.
+    pub updated_at: String,
+    pub tags: Vec<String>,
+}
+
+/// A date for display, in the machine's time zone.
+///
+/// Timestamps are stored in UTC because that sorts correctly and is
+/// unambiguous, but a date an author typed by hand — `date: 2026-01-05`, or a
+/// `2026-01-05-` file name prefix — means local midnight. Slicing the UTC
+/// string would then show the previous day anywhere east of Greenwich.
+fn format_local_date(raw: &str) -> String {
+    chrono::DateTime::parse_from_rfc3339(raw)
+        .map(|stamp| {
+            stamp
+                .with_timezone(&chrono::Local)
+                .format("%Y-%m-%d")
+                .to_string()
+        })
+        .unwrap_or_else(|_| raw.chars().take(10).collect())
 }
 
 /// A tag as stored in the `tags` table.
@@ -206,5 +260,51 @@ mod tests {
         assert!(!form.is_publish());
         form.status = "published".into();
         assert!(form.is_publish());
+    }
+
+    fn post_with(published_at: Option<&str>, updated_at: &str) -> Post {
+        Post {
+            id: 1,
+            slug: "s".into(),
+            title: "t".into(),
+            summary: String::new(),
+            body_md: String::new(),
+            published: published_at.is_some(),
+            created_at: updated_at.to_string(),
+            updated_at: updated_at.to_string(),
+            published_at: published_at.map(str::to_string),
+            source_path: None,
+        }
+    }
+
+    #[test]
+    fn display_date_is_the_local_date_not_the_utc_one() {
+        // A hand-written `2026-01-05` becomes UTC midnight minus the offset.
+        // Displaying the raw UTC prefix would show 2026-01-04 in Asia/Shanghai.
+        let post = post_with(Some("2026-01-04T16:00:00Z"), "2026-01-04T16:00:00Z");
+
+        let expected = chrono::DateTime::parse_from_rfc3339("2026-01-04T16:00:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Local)
+            .format("%Y-%m-%d")
+            .to_string();
+
+        assert_eq!(post.display_date(), expected);
+    }
+
+    #[test]
+    fn display_date_prefers_publication_and_falls_back_for_junk() {
+        let post = post_with(Some("2026-03-04T05:06:07Z"), "2026-01-01T00:00:00Z");
+        // published_at wins over updated_at; only the zone can change the day.
+        assert!(
+            post.display_date().starts_with("2026-03-0"),
+            "got {}",
+            post.display_date()
+        );
+
+        // An unparseable value degrades to its first ten characters rather than
+        // panicking.
+        let broken = post_with(Some("not-a-timestamp"), "also-junk");
+        assert_eq!(broken.display_date(), "not-a-time");
     }
 }
