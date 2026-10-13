@@ -6,12 +6,13 @@
 
 use std::{net::SocketAddr, path::PathBuf, time::Duration};
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use clap::{Args, Parser, Subcommand};
 use tblogs::{
+    assets::Assets,
     bundle::{self, BundleOptions},
-    config::ServerConfig,
-    content, db,
+    config::{self, ServerConfig},
+    content, db, export,
     models::Settings,
     package,
     publish::{self, Target},
@@ -39,6 +40,9 @@ enum Action {
 
     /// Add the deployable server files to a package.
     Bundle(BundleArgs),
+
+    /// Render the package to static files, for hosting without a server.
+    Export(ExportArgs),
 
     /// Copy a package to a server over SSH.
     Publish(PublishArgs),
@@ -119,6 +123,22 @@ struct BundleArgs {
 }
 
 #[derive(Debug, Args)]
+struct ExportArgs {
+    /// Package directory produced by `build`.
+    #[arg(long, env = "TBLOGS_DIST", default_value = DEFAULT_DIST_DIR_STR)]
+    out: PathBuf,
+
+    /// Where to write the static site. Defaults to `<out>/site`.
+    #[arg(long, env = "TBLOGS_SITE_DIR", value_name = "DIR")]
+    site_dir: Option<PathBuf>,
+
+    /// Posts per listing page. Must match what `preview` uses, or the
+    /// pagination will not line up with what you saw locally.
+    #[arg(long, env = "TBLOGS_PAGE_SIZE", default_value_t = 10)]
+    page_size: i64,
+}
+
+#[derive(Debug, Args)]
 struct PublishArgs {
     /// Package directory to send.
     #[arg(long, env = "TBLOGS_DIST", default_value = DEFAULT_DIST_DIR_STR)]
@@ -156,6 +176,7 @@ async fn main() -> Result<()> {
         Action::Build(args) => build(&args).await,
         Action::Preview(args) => preview(args).await,
         Action::Bundle(args) => bundle(&args),
+        Action::Export(args) => export_site(&args).await,
         Action::Publish(args) => publish(&args),
         Action::Doctor(args) => doctor(&args),
     };
@@ -326,6 +347,68 @@ fn bundle(args: &BundleArgs) -> Result<()> {
         "然后在服务器上: sudo bash {}/install.sh",
         report.directory.display()
     );
+
+    Ok(())
+}
+
+async fn export_site(args: &ExportArgs) -> Result<()> {
+    let site_dir = args
+        .site_dir
+        .clone()
+        .unwrap_or_else(|| args.out.join("site"));
+
+    let database = args.out.join(config::DATABASE_FILE);
+    let media = args.out.join(config::MEDIA_DIR);
+
+    if !database.is_file() {
+        bail!(
+            "{} 不存在。先运行 `tblogs-admin build`。",
+            database.display()
+        );
+    }
+
+    let pool = db::open_read_only(&database)
+        .await
+        .with_context(|| format!("打开 {} 失败", database.display()))?;
+
+    let settings = db::load_settings(&pool).await?;
+    let assets = Assets::new(&media)?;
+
+    println!("正在导出静态站点");
+    let mut log = |message: &str| println!("{message}");
+
+    let report = export::export_site(
+        &pool,
+        &assets,
+        &settings,
+        args.page_size,
+        &site_dir,
+        &media,
+        &mut log,
+    )
+    .await?;
+
+    pool.close().await;
+
+    println!();
+    println!("静态站点已生成: {}", site_dir.display());
+    println!(
+        "  {} 个 HTML, {} 个媒体文件, {:.1} MiB",
+        report.html_files,
+        report.media_files,
+        report.bytes as f64 / (1024.0 * 1024.0)
+    );
+    println!();
+    println!("本地核对:   tblogs-admin preview        （URL 与静态版一致）");
+    println!(
+        "按静态方式核对: npx wrangler pages dev {}",
+        site_dir.display()
+    );
+    println!(
+        "部署到 Cloudflare Pages: npx wrangler pages deploy {}",
+        site_dir.display()
+    );
+    println!("或把整个目录交给任意静态托管 / nginx。");
 
     Ok(())
 }

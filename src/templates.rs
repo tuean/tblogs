@@ -75,3 +75,15 @@ pub struct FeedTemplate {
     pub last_build: String,
     pub items: Vec<FeedItem>,
 }
+
+/// The 404 page.
+///
+/// A static host needs this file to exist: Cloudflare Pages treats a project
+/// without a top-level `404.html` as a single-page application and answers
+/// unknown paths with the root document instead of a 404.
+#[derive(Template)]
+#[template(path = "not_found.html")]
+pub struct NotFoundTemplate {
+    pub site_title: String,
+    pub site_description: String,
+}

@@ -65,6 +65,9 @@ tblogs-admin build && tblogs-admin bundle && tblogs-admin publish
 
 发布前可以先 `tblogs-admin doctor` 自检（目录、依赖工具、SSH 连通性）。
 
+> 如果你打算用静态托管（Cloudflare Pages 等），跳过 `bundle` 和 `publish`，
+> 直接用 `export`——见下面的「静态部署」。
+
 ### 首次部署（只做一次）
 
 ```bash
@@ -140,6 +143,16 @@ tblogs-admin bundle --out dist --domain blog.example.com --install-dir /opt/tblo
 
 配置模板**编译在二进制里**，并按你给的域名和路径渲染好，没有留给你手改的占位符。
 `--data-dir` 默认是 `<install-dir>/data`。
+
+### `export` — 渲染成静态站点
+
+```bash
+tblogs-admin export --out dist                # 写入 dist/site/
+tblogs-admin export --out dist --page-size 20 # 每页文章数
+```
+
+把内容包渲染成一棵静态文件树，交给任意静态托管，不需要服务器。细节见
+上面的「[静态部署](#静态部署不需要服务器)」。
 
 ### `publish` — 发布到服务器
 
@@ -267,6 +280,48 @@ tblogs-server --data-dir /srv/tblogs/data --bind 127.0.0.1:8080
 
 ---
 
+## 静态部署（不需要服务器）
+
+服务端是**只读**的：每个页面都是内容包的纯函数。所以整站可以预渲染成静态文件，
+**功能上不丢任何东西**——不需要服务器、公网 IP、端口转发或 DDNS。
+
+```bash
+tblogs-admin build     # 先有内容包
+tblogs-admin export    # 渲染成静态站点，写入 <dist>/site/
+npx wrangler pages deploy dist/site    # 或交给任意静态托管
+```
+
+产物结构：
+
+```
+dist/site/
+  index.html                              # 首页
+  page/2.html  page/3.html                # 分页：查询串换成路径
+  posts/<slug>.html                       # 每篇文章
+  tags.html                               # 标签云
+  tags/<slug>.html                        # 每个标签
+  tags/<slug>/page/2.html                 # 标签的第二页起
+  feed.xml  404.html   static/style.css   media/...
+```
+
+有三点值得注意：
+
+- **分页从 `?page=2` 变成 `page/2`。** 静态托管无法路由查询串，所以页码进入路径，
+  落盘为 `page/2.html`；托管会把它对应到无扩展名的 `/page/2`。
+- **`404.html` 是必需的，不是装饰。** Cloudflare Pages 在没有它的项目里会当成
+  单页应用，用首页回应**所有**未知路径，而不是返回 404。
+- **页面里的链接与动态版完全一致**（都不带扩展名），所以部署到静态托管不必改
+  URL 结构。
+
+本地核对：`tblogs-admin preview` 的 URL 与静态版相同；要按静态方式核对，
+用 `npx wrangler pages dev dist/site`。
+
+> 静态托管要求站点位于**域名根目录**：模板里的链接是 `/posts/...` 这样的绝对
+> 路径，放到子路径下会失效。
+
+`export` 每次都会**清空**目标目录后重建。这是刻意的：改过名或取消发布的文章
+否则会留下旧页面，继续被访问、继续被搜索引擎收录。
+
 ## 部署与公网访问
 
 `deploy/README.md` 详细说明了公网访问需要的条件，以及一个容易被忽略的事实：
@@ -303,6 +358,8 @@ src/
   state.rs               当前内容包的快照（原子换）
   package.rs             构建内容包：写库 + 镜像资源
   bundle.rs              渲染可部署目录
+  pages.rs               构建页面（服务端与静态导出共用）
+  export.rs              整站渲染成静态文件
   publish.rs             SSH 建目录 + rsync
   content.rs             扫描目录、指纹、同步成文章
   frontmatter.rs         front matter 解析与标题/日期回退
@@ -312,7 +369,7 @@ src/
   models.rs              Post / Tag / Settings 等
   slug.rs                生成 URL slug（保留 CJK）
   error.rs               统一错误页
-  routes/                public / feed
+  routes/                public / feed（只负责取页面并转成响应）
 templates/               askama 模板（编译期编入二进制）
 static/style.css         样式，支持深色模式（编译期内嵌）
 migrations/0001_schema.sql  唯一的 schema，编译期编入二进制（库每次重建，无需迁移链）

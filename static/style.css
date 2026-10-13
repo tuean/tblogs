@@ -349,3 +349,12 @@ table.admin form { margin: 0; }
 .tag-cloud { line-height: 2.1; }
 
 .tag-cloud .tag { margin-right: 0.35rem; }
+
+.not-found { padding: 4rem 0; text-align: center; }
+
+.not-found h1 {
+  margin: 0;
+  font-size: 4rem;
+  line-height: 1;
+  color: var(--fg-muted);
+}

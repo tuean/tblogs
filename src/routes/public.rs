@@ -1,6 +1,8 @@
 //! The public, read-only surface of the blog.
-
-use std::collections::HashMap;
+//!
+//! These handlers only choose a page and turn it into a response. The page
+//! building itself lives in `pages`, shared with the static exporter so the two
+//! cannot render the site differently.
 
 use axum::{
     extract::{Path, Query, State},
@@ -10,14 +12,10 @@ use axum::{
 use serde::Deserialize;
 
 use crate::{
-    assets::Assets,
     db,
     error::AppError,
-    markdown,
-    models::{Post, PostView, Tag},
-    state::AppState,
-    templates::{IndexTemplate, PostTemplate, TagTemplate, TagsTemplate},
-    util::{self, paginate},
+    pages::{LinkStyle, Site},
+    state::{AppState, Snapshot},
 };
 
 /// `?page=N`
@@ -27,35 +25,29 @@ pub struct PageQuery {
     pub page: Option<i64>,
 }
 
+/// Borrow the current package as a page builder.
+///
+/// The live server paginates through a query string; the static exporter puts
+/// the page number in the path instead.
+fn site<'a>(state: &'a AppState, snapshot: &'a Snapshot) -> Site<'a> {
+    Site {
+        pool: &snapshot.pool,
+        assets: &state.assets,
+        settings: &snapshot.settings,
+        page_size: state.page_size,
+        links: LinkStyle::Query,
+    }
+}
+
 /// Home page: published posts, newest first.
 pub async fn index(
     State(state): State<AppState>,
     Query(query): Query<PageQuery>,
 ) -> Result<Html<String>, AppError> {
     let snapshot = state.current().await;
+    let page = site(&state, &snapshot).home(query.page).await?;
 
-    let total = db::count_published(&snapshot.pool).await?;
-    let page = paginate(query.page, total, state.page_size, "/");
-
-    let posts = db::list_published(&snapshot.pool, state.page_size, page.offset).await?;
-    let tag_map = db::tags_by_post(&snapshot.pool).await?;
-
-    let posts = posts
-        .into_iter()
-        .map(|post| to_view(post, &tag_map, false, &state.assets))
-        .collect();
-
-    super::render(&IndexTemplate {
-        site_title: snapshot.title(),
-        site_description: snapshot.description(),
-        posts,
-        page: page.page,
-        total_pages: page.total_pages,
-        has_prev: page.has_prev,
-        has_next: page.has_next,
-        prev_href: page.prev_href,
-        next_href: page.next_href,
-    })
+    super::render(&page)
 }
 
 /// A single published post.
@@ -65,30 +57,20 @@ pub async fn post_detail(
 ) -> Result<Html<String>, AppError> {
     let snapshot = state.current().await;
 
-    let post = db::find_published_by_slug(&snapshot.pool, &slug)
+    let page = site(&state, &snapshot)
+        .post(&slug)
         .await?
         .ok_or_else(|| AppError::not_found(format!("文章「{slug}」不存在")))?;
 
-    let tag_map = db::tags_by_post(&snapshot.pool).await?;
-
-    super::render(&PostTemplate {
-        site_title: snapshot.title(),
-        site_description: snapshot.description(),
-        post: to_view(post, &tag_map, true, &state.assets),
-    })
+    super::render(&page)
 }
 
 /// The tag cloud.
 pub async fn tags_index(State(state): State<AppState>) -> Result<Html<String>, AppError> {
     let snapshot = state.current().await;
+    let page = site(&state, &snapshot).tags().await?;
 
-    let tags = db::list_tags_with_counts(&snapshot.pool).await?;
-
-    super::render(&TagsTemplate {
-        site_title: snapshot.title(),
-        site_description: snapshot.description(),
-        tags,
-    })
+    super::render(&page)
 }
 
 /// Published posts carrying one tag.
@@ -99,39 +81,12 @@ pub async fn tag_detail(
 ) -> Result<Html<String>, AppError> {
     let snapshot = state.current().await;
 
-    let tag = db::find_tag_by_slug(&snapshot.pool, &slug)
+    let page = site(&state, &snapshot)
+        .tag(&slug, query.page)
         .await?
         .ok_or_else(|| AppError::not_found(format!("标签「{slug}」不存在")))?;
 
-    let total = db::count_published_by_tag(&snapshot.pool, &tag.slug).await?;
-    let page = paginate(
-        query.page,
-        total,
-        state.page_size,
-        &util::tag_path(&tag.slug),
-    );
-
-    let posts =
-        db::list_published_by_tag(&snapshot.pool, &tag.slug, state.page_size, page.offset).await?;
-    let tag_map = db::tags_by_post(&snapshot.pool).await?;
-
-    let posts = posts
-        .into_iter()
-        .map(|post| to_view(post, &tag_map, false, &state.assets))
-        .collect();
-
-    super::render(&TagTemplate {
-        site_title: snapshot.title(),
-        site_description: snapshot.description(),
-        tag_name: tag.name,
-        posts,
-        page: page.page,
-        total_pages: page.total_pages,
-        has_prev: page.has_prev,
-        has_next: page.has_next,
-        prev_href: page.prev_href,
-        next_href: page.next_href,
-    })
+    super::render(&page)
 }
 
 /// Liveness probe that also touches the database, so it reports real readiness
@@ -153,7 +108,7 @@ pub async fn stylesheet() -> impl IntoResponse {
             (header::CONTENT_TYPE, "text/css; charset=utf-8"),
             (header::CACHE_CONTROL, "public, max-age=3600"),
         ],
-        include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/static/style.css")),
+        crate::assets::STYLESHEET,
     )
 }
 
@@ -219,51 +174,4 @@ pub async fn media(
         bytes,
     )
         .into_response())
-}
-
-/// Build a render-ready post.
-///
-/// `with_body` controls whether the Markdown body is rendered. List pages show
-/// only the stored summary, so rendering every body there would be wasted work;
-/// those views carry an empty `body_html` that their templates never reference.
-///
-/// Local image references are resolved against the post's own source path, which
-/// is why the published asset layout mirrors the author's directory.
-fn to_view(
-    post: Post,
-    tags: &HashMap<i64, Vec<Tag>>,
-    with_body: bool,
-    assets: &Assets,
-) -> PostView {
-    let date = post.display_date();
-
-    let body_html = if with_body {
-        markdown::render_with_assets(&post.body_md, assets, &post.source_path)
-    } else {
-        String::new()
-    };
-
-    let tags = tags.get(&post.id).cloned().unwrap_or_default();
-
-    // A cover is usually a remote URL, which the resolver leaves untouched;
-    // a local path is repointed at /media/ exactly like an inline image.
-    let cover = post
-        .cover_image
-        .as_deref()
-        .map(|raw| {
-            assets
-                .url_for(raw, &post.source_path)
-                .unwrap_or_else(|| raw.to_string())
-        })
-        .unwrap_or_default();
-
-    PostView {
-        slug: post.slug,
-        title: post.title,
-        summary: post.summary,
-        body_html,
-        date,
-        tags,
-        cover,
-    }
 }

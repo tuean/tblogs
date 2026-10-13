@@ -293,6 +293,13 @@ fn hex(byte: u8) -> Option<u8> {
     }
 }
 
+/// The site stylesheet, compiled into the binary.
+///
+/// Embedded so the live server needs no asset tree beside it, and so the static
+/// exporter can write out exactly the same bytes. Sharing the constant is the
+/// point: two copies would be free to drift.
+pub const STYLESHEET: &str = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/static/style.css"));
+
 #[cfg(test)]
 mod tests {
     use super::*;

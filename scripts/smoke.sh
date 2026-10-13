@@ -378,6 +378,75 @@ for script in install.sh ddns-update.sh check-exposure.sh; do
   fi
 done
 
+# ---------------------------------------------------------------- export
+echo
+echo "export"
+# A small page size so pagination is actually exercised: the static export has
+# to move the page number into the path, and that is the part most likely to
+# rot silently.
+export_output="$("$ADMIN" export --out "$DIST" --site-dir "$DIST/site" --page-size 2 2>&1)"
+check "tblogs-admin export exits 0" "0" "$?"
+SITE="$DIST/site"
+
+for produced in index.html 404.html feed.xml tags.html static/style.css \
+                media/assets/pic.png posts/hello.html; do
+  if [[ -f "$SITE/$produced" ]]; then
+    ok "static export contains $produced"
+  else
+    bad "static export is missing $produced (\n$export_output)"
+  fi
+done
+
+# A draft must not exist as a file at all, not merely redirect.
+if [[ -f "$SITE/posts/draft.html" ]]; then
+  bad "a draft was given a static page"
+else
+  ok "a draft was given no static page"
+fi
+
+# Pagination reached the path, and the query form is gone.
+if [[ -f "$SITE/page/2.html" ]]; then
+  ok "page 2 was written as page/2.html"
+else
+  bad "page/2.html is missing"
+fi
+check_contains "pagination links use a path" 'href="/page/2"' "$(cat "$SITE/index.html")"
+check_missing "pagination emits no query string" '?page=' "$(cat "$SITE/index.html")"
+
+# 404.html is not cosmetic: Cloudflare Pages treats a project without one as a
+# single-page app and answers unknown paths with the home page.
+check_contains "the 404 page is a real page" "没有这个页面" "$(cat "$SITE/404.html")"
+
+# Every internal link must resolve to a file, using the host's lookup order:
+# exact, then .html, then /index.html.
+link_report="$(python3 - "$SITE" <<'PYEOF'
+import html, pathlib, re, sys, urllib.parse
+root = pathlib.Path(sys.argv[1])
+link = re.compile(r'(?:href|src)="([^"]+)"')
+def resolve(path):
+    rel = urllib.parse.unquote(path).lstrip("/") or "index.html"
+    for candidate in (root / rel, root / (rel + ".html"), root / rel / "index.html"):
+        if candidate.is_file():
+            return candidate
+    return None
+broken = []
+for page in root.rglob("*.html"):
+    for raw in link.findall(page.read_text(errors="replace")):
+        if raw.startswith(("http://", "https://", "//", "mailto:", "data:", "#")):
+            continue
+        target = html.unescape(raw).split("#")[0].split("?")[0]
+        if target and resolve(target) is None:
+            broken.append(f"{page.relative_to(root)} -> {raw}")
+print(len(broken))
+for entry in broken[:5]:
+    print(entry)
+PYEOF
+)"
+check "every internal link in the static export resolves" "0" "$(printf '%s' "$link_report" | head -1)"
+if [[ "$(printf '%s' "$link_report" | head -1)" != "0" ]]; then
+  printf '%s\n' "$link_report" | tail -n +2 >&2
+fi
+
 echo
 if [[ "$FAIL" -eq 0 ]]; then
   printf '\033[32m%d checks passed\033[0m\n' "$PASS"
