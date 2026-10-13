@@ -5,10 +5,7 @@
 //! `String` does not, so the column list is shared through a macro rather than
 //! by concatenating at runtime.
 
-use std::{
-    collections::HashMap,
-    path::{Path, PathBuf},
-};
+use std::{collections::HashMap, path::Path};
 
 use anyhow::{Context, Result};
 use sqlx::{
@@ -97,7 +94,7 @@ pub async fn open_for_build(path: &Path) -> Result<SqlitePool> {
         .await
         .with_context(|| format!("could not open {} for building", path.display()))?;
 
-    apply_migrations(&pool).await?;
+    create_schema(&pool).await?;
 
     Ok(pool)
 }
@@ -194,64 +191,25 @@ pub async fn save_settings(pool: &SqlitePool, settings: &Settings) -> Result<()>
     Ok(())
 }
 
-/// Apply every pending migration.
+/// The package schema, compiled into the binary.
 ///
-/// The migration directory is resolved at runtime with `Migrator::new` rather
-/// than through the `sqlx::migrate!` macro, so the sqlx-macros proc macro is
-/// not needed at all. See the note on `FromRow` in `models.rs`.
-pub(crate) async fn apply_migrations(pool: &SqlitePool) -> Result<()> {
-    let dir = migrations_dir()?;
+/// The database is recreated from scratch on every build, so there is exactly
+/// one schema and no migration history to track.
+///
+/// Embedding it makes the client a single portable executable: nothing has to
+/// be located on disk at run time. That matters as soon as it is installed
+/// somewhere like `~/.cargo/bin`, where no sibling `migrations/` directory
+/// exists — which is exactly how the earlier runtime lookup failed.
+const SCHEMA: &str = include_str!("../migrations/0001_schema.sql");
 
-    let migrator = sqlx::migrate::Migrator::new(dir.as_path())
+/// Create the package schema in a freshly opened database.
+pub(crate) async fn create_schema(pool: &SqlitePool) -> Result<()> {
+    sqlx::raw_sql(SCHEMA)
+        .execute(pool)
         .await
-        .with_context(|| format!("could not read {}", dir.display()))?;
-
-    migrator
-        .run(pool)
-        .await
-        .context("database migration failed")?;
+        .context("could not create the package schema")?;
 
     Ok(())
-}
-
-/// Locate the directory holding the `.sql` migrations.
-///
-/// Checked in order: `TBLOGS_MIGRATIONS_DIR`, then `./migrations` relative to
-/// the working directory (which the systemd unit pins to the install root),
-/// then `migrations/` beside the executable.
-///
-/// A compile-time path would be wrong here: the binary is normally built on one
-/// machine and copied to another, where the build directory does not exist.
-fn migrations_dir() -> Result<PathBuf> {
-    let mut candidates = Vec::new();
-
-    if let Ok(dir) = std::env::var("TBLOGS_MIGRATIONS_DIR")
-        && !dir.trim().is_empty()
-    {
-        candidates.push(PathBuf::from(dir));
-    }
-
-    candidates.push(PathBuf::from("migrations"));
-
-    if let Ok(exe) = std::env::current_exe()
-        && let Some(parent) = exe.parent()
-    {
-        candidates.push(parent.join("migrations"));
-    }
-
-    for candidate in &candidates {
-        if candidate.is_dir() {
-            return Ok(candidate.clone());
-        }
-    }
-
-    let looked_in = candidates
-        .iter()
-        .map(|p| p.display().to_string())
-        .collect::<Vec<_>>()
-        .join(", ");
-
-    anyhow::bail!("no migrations directory found; looked in: {looked_in}")
 }
 
 // ---------------------------------------------------------------- queries
@@ -676,7 +634,7 @@ mod tests {
             .await
             .unwrap();
 
-        apply_migrations(&pool).await.unwrap();
+        create_schema(&pool).await.unwrap();
         pool
     }
 

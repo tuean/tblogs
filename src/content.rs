@@ -542,7 +542,7 @@ mod tests {
             .await
             .unwrap();
 
-        db::apply_migrations(&pool).await.unwrap();
+        db::create_schema(&pool).await.unwrap();
         pool
     }
 

@@ -15,6 +15,17 @@
 
 ---
 
+## 安装
+
+```bash
+cargo install --path . --locked     # 装到 ~/.cargo/bin，两个命令都可用
+```
+
+装完 `tblogs-admin` / `tblogs-server` 就在 PATH 上，**可以在任意目录调用**。
+卸载用 `cargo uninstall tblogs`。
+
+客户端是**单文件**的：schema 编译在二进制里，运行时不读任何外部文件。
+
 ## 快速开始
 
 ```bash
@@ -273,7 +284,7 @@ src/
   routes/                public / feed
 templates/               askama 模板（编译期编入二进制）
 static/style.css         样式，支持深色模式（编译期内嵌）
-migrations/0001_schema.sql  唯一的 schema（库每次重建，无需迁移链）
+migrations/0001_schema.sql  唯一的 schema，编译期编入二进制（库每次重建，无需迁移链）
 scripts/smoke.sh         端到端测试
 deploy/                  部署模板 + 公网接入说明（bundle 直接内嵌这些文件）
 ```

@@ -157,6 +157,9 @@ EOF
 
 # ---------------------------------------------------------------- build
 echo "build"
+# Run from a neutral directory: the client is a portable executable and must
+# not depend on a schema directory sitting beside it in the source tree.
+cd /
 build_output="$("$ADMIN" build \
   --content-dir "$CONTENT" \
   --out "$DIST" \
@@ -165,6 +168,7 @@ build_output="$("$ADMIN" build \
   --description '本地目录写作' 2>&1)"
 build_status=$?
 
+cd "$ROOT"
 check "tblogs-admin build exits 0" "0" "$build_status"
 if [[ "$build_status" != "0" ]]; then
   echo "$build_output" >&2
