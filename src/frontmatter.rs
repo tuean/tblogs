@@ -251,12 +251,24 @@ fn localise(naive: NaiveDateTime) -> Option<String> {
 /// Used both to date a document by its file name and to strip that prefix when
 /// deriving a title or slug.
 pub fn split_date_prefix(stem: &str) -> (Option<String>, &str) {
-    let bytes = stem.as_bytes();
-    if bytes.len() < 11 {
+    /// Length of `YYYY-MM-DD`.
+    const PREFIX_LEN: usize = 10;
+
+    // The prefix is ten ASCII bytes. Both guards matter: slicing at byte 10
+    // panics when it lands inside a multi-byte character, and a Chinese file
+    // name crosses it easily — in `图片与目录结构`, `目` spans bytes 9..12.
+    if stem.len() < PREFIX_LEN + 1
+        || !stem.is_char_boundary(PREFIX_LEN)
+        || !stem.as_bytes()[..PREFIX_LEN]
+            .iter()
+            .all(|byte| byte.is_ascii_digit() || *byte == b'-')
+    {
         return (None, stem);
     }
 
-    let (head, rest) = stem.split_at(10);
+    let (head, rest) = stem.split_at(PREFIX_LEN);
+
+    // `rest` begins with an ASCII separator, so slicing off one byte is safe.
     let separator = rest.as_bytes().first().copied();
     if !matches!(separator, Some(b'-') | Some(b'_')) {
         return (None, stem);
@@ -371,6 +383,32 @@ mod tests {
         let (date, rest) = split_date_prefix("2026-13-45-bad");
         assert!(date.is_none());
         assert_eq!(rest, "2026-13-45-bad");
+    }
+
+    #[test]
+    fn date_prefix_splitting_survives_multibyte_file_names() {
+        // Regression: byte 10 falls inside `目` here, and slicing at a
+        // non-char-boundary used to panic the whole server at startup.
+        for name in [
+            "图片与目录结构",
+            "我的第一篇博客文章",
+            "中文标题很长很长很长",
+            "笔记",
+        ] {
+            let (date, rest) = split_date_prefix(name);
+            assert!(date.is_none(), "{name} should have no date prefix");
+            assert_eq!(rest, name);
+        }
+
+        // A real date prefix in front of a CJK title still splits correctly.
+        let (date, rest) = split_date_prefix("2026-01-05-中文标题");
+        assert!(date.is_some());
+        assert_eq!(rest, "中文标题");
+
+        // Multi-byte text exactly at the boundary must also be safe.
+        let (date, rest) = split_date_prefix("中文中文中文中");
+        assert!(date.is_none());
+        assert_eq!(rest, "中文中文中文中");
     }
 
     #[test]
