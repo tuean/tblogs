@@ -223,6 +223,7 @@ pub fn build_post(root: &Path, file: &SourceFile) -> Result<SourcedPost> {
         date_hint: document.front.date.clone().or(name_date),
         updated_at: iso_from_nanos(file.mtime),
         tags: normalise_tags(&document.front.tags),
+        cover_image: document.front.image.clone(),
     })
 }
 
@@ -390,6 +391,32 @@ mod tests {
         assert!(take_leading_heading("#NoSpace\n\nBody").is_none());
         assert!(take_leading_heading("Intro text\n\n# Later\n").is_none());
         assert!(take_leading_heading("").is_none());
+    }
+
+    #[test]
+    fn the_cover_field_reaches_the_post() {
+        let root = std::env::temp_dir().join(format!("tblogs-cover-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+
+        let source = SourceFile {
+            rel_path: "post.md".to_string(),
+            mtime: 1,
+        };
+
+        std::fs::write(
+            root.join("post.md"),
+            "---\ntitle: With cover\nimage: https://cdn.example.com/a.jpg\n---\n\nBody.\n",
+        )
+        .unwrap();
+
+        let post = build_post(&root, &source).unwrap();
+        assert_eq!(
+            post.cover_image.as_deref(),
+            Some("https://cdn.example.com/a.jpg")
+        );
+
+        std::fs::remove_dir_all(&root).unwrap();
     }
 
     #[test]

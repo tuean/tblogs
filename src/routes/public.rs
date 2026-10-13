@@ -245,6 +245,18 @@ fn to_view(
 
     let tags = tags.get(&post.id).cloned().unwrap_or_default();
 
+    // A cover is usually a remote URL, which the resolver leaves untouched;
+    // a local path is repointed at /media/ exactly like an inline image.
+    let cover = post
+        .cover_image
+        .as_deref()
+        .map(|raw| {
+            assets
+                .url_for(raw, &post.source_path)
+                .unwrap_or_else(|| raw.to_string())
+        })
+        .unwrap_or_default();
+
     PostView {
         slug: post.slug,
         title: post.title,
@@ -252,5 +264,6 @@ fn to_view(
         body_html,
         date,
         tags,
+        cover,
     }
 }

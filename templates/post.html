@@ -4,6 +4,9 @@
 
 {% block content %}
 <article>
+  {% if !post.cover.is_empty() %}
+  <img class="post-hero" src="{{ post.cover }}" alt="" loading="lazy" decoding="async">
+  {% endif %}
   <header>
     <h1>{{ post.title }}</h1>
     <p class="post-meta">

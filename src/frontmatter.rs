@@ -29,6 +29,11 @@ pub struct FrontMatter {
     pub date: Option<String>,
     pub tags: Vec<String>,
     pub summary: Option<String>,
+    /// Cover image, as written by Hexo-style front matter (`image:`).
+    ///
+    /// Usually a remote URL, but a local path is accepted too and resolved
+    /// against the content directory like any other asset reference.
+    pub image: Option<String>,
     pub draft: bool,
 }
 
@@ -49,15 +54,21 @@ pub struct Document {
 pub fn parse(raw: &str) -> Document {
     let raw = raw.strip_prefix('\u{feff}').unwrap_or(raw);
 
-    let mut lines = raw.lines();
-    let Some(first) = lines.next() else {
+    // Split on `\n` *keeping* the terminator, so summing `chunk.len()` gives an
+    // exact byte offset. Using `lines()` and adding one per line looks
+    // equivalent but is not: `lines()` also strips a preceding `\r`, so on a
+    // CRLF document — which is what most Windows-authored Markdown is — the
+    // offset drifts one byte per line and eventually slices mid-character.
+    let mut chunks = raw.split_inclusive('\n');
+
+    let Some(opening) = chunks.next() else {
         return Document {
             front: FrontMatter::default(),
             body: String::new(),
         };
     };
 
-    if first.trim_end() != "---" {
+    if opening.trim_end() != "---" {
         return Document {
             front: FrontMatter::default(),
             body: raw.to_string(),
@@ -66,20 +77,20 @@ pub fn parse(raw: &str) -> Document {
 
     let mut block = Vec::new();
     let mut closed = false;
-    let mut body_start = 0usize;
+    let mut offset = opening.len();
 
-    // Track byte offsets so the body keeps its original formatting.
-    let mut offset = first.len() + 1;
-    for line in raw[offset..].lines() {
+    for chunk in chunks {
+        offset += chunk.len();
+
+        let line = strip_terminator(chunk);
         let trimmed = line.trim_end();
+
         if trimmed == "---" || trimmed == "..." {
             closed = true;
-            offset += line.len() + 1;
-            body_start = offset.min(raw.len());
             break;
         }
+
         block.push(line.to_string());
-        offset += line.len() + 1;
     }
 
     if !closed {
@@ -92,8 +103,15 @@ pub fn parse(raw: &str) -> Document {
 
     Document {
         front: parse_block(&block),
-        body: raw[body_start..].trim_start_matches('\n').to_string(),
+        // Also drop a stray `\r` left by a CRLF file.
+        body: raw[offset..].trim_start_matches(['\n', '\r']).to_string(),
     }
+}
+
+/// Remove a trailing `\n` and `\r` from a `split_inclusive` chunk.
+fn strip_terminator(chunk: &str) -> &str {
+    let chunk = chunk.strip_suffix('\n').unwrap_or(chunk);
+    chunk.strip_suffix('\r').unwrap_or(chunk)
 }
 
 /// Parse the lines between the `---` fences.
@@ -139,6 +157,7 @@ fn parse_block(lines: &[String]) -> FrontMatter {
             "summary" | "description" | "excerpt" => {
                 front.summary = non_empty(unquote(value));
             }
+            "image" | "cover" | "thumbnail" => front.image = non_empty(unquote(value)),
             "date" | "published" | "pubdate" => front.date = parse_date(value),
             "draft" => front.draft = parse_bool(value),
             "tags" | "tag" | "categories" | "keywords" => {
@@ -308,6 +327,24 @@ mod tests {
     }
 
     #[test]
+    fn parses_the_hexo_cover_field() {
+        // Hexo writes the cover as `image:`; quoted URLs are common.
+        let doc = parse("---\nimage: 'https://cdn.example.com/a.jpg'\ntitle: x\n---\nbody");
+        assert_eq!(
+            doc.front.image.as_deref(),
+            Some("https://cdn.example.com/a.jpg")
+        );
+
+        // `cover` and `thumbnail` are accepted as aliases.
+        let doc = parse("---\ncover: ./local.png\n---\nbody");
+        assert_eq!(doc.front.image.as_deref(), Some("./local.png"));
+
+        // Absent means absent, not an empty string.
+        let doc = parse("---\ntitle: x\n---\nbody");
+        assert!(doc.front.image.is_none());
+    }
+
+    #[test]
     fn parses_block_lists_and_quoted_values() {
         let doc = parse(
             "---\n\
@@ -340,6 +377,42 @@ mod tests {
         let doc = parse("\u{feff}---\ntitle: x\n---\nbody");
         assert_eq!(doc.front.title.as_deref(), Some("x"));
         assert_eq!(doc.body, "body");
+    }
+
+    #[test]
+    fn parses_front_matter_in_a_crlf_document() {
+        // Windows line endings, which is what most editor-authored Markdown
+        // uses. Regression: the body offset used to be computed by adding one
+        // byte per line, which drifts by one byte per line on CRLF and panics
+        // as soon as the document contains multi-byte characters.
+        let raw =
+            "---\r\ntitle: 中文标题\r\ntags: [a, b]\r\n---\r\n\r\n# 正文标题\r\n\r\n内容。\r\n";
+        let doc = parse(raw);
+
+        assert_eq!(doc.front.title.as_deref(), Some("中文标题"));
+        assert_eq!(doc.front.tags, vec!["a", "b"]);
+        assert!(
+            !doc.body.contains("title:"),
+            "body still contains front matter: {:?}",
+            doc.body
+        );
+        assert!(doc.body.contains("# 正文标题"), "got {:?}", doc.body);
+    }
+
+    #[test]
+    fn crlf_documents_without_front_matter_are_untouched() {
+        let raw = "# 标题\r\n\r\n正文。\r\n";
+        let doc = parse(raw);
+        assert_eq!(doc.front, FrontMatter::default());
+        assert_eq!(doc.body, raw);
+    }
+
+    #[test]
+    fn a_crlf_block_ending_in_a_dots_fence_is_recognised() {
+        let raw = "---\r\ntitle: x\r\n...\r\nbody\r\n";
+        let doc = parse(raw);
+        assert_eq!(doc.front.title.as_deref(), Some("x"));
+        assert_eq!(doc.body, "body\r\n");
     }
 
     #[test]

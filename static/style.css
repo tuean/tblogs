@@ -110,6 +110,37 @@ body {
 
 .post-summary { margin: 0.5rem 0 0; color: var(--fg-muted); }
 
+/* Cover art, when the front matter supplies an `image:`. */
+.post-item { display: flex; gap: 1.25rem; align-items: flex-start; }
+
+.post-item-body { flex: 1 1 auto; min-width: 0; }
+
+.post-thumb { flex: 0 0 9rem; }
+
+.post-thumb img {
+  display: block;
+  width: 9rem;
+  height: 5.5rem;
+  object-fit: cover;
+  border-radius: var(--radius);
+  background: var(--bg-soft);
+}
+
+.post-hero {
+  display: block;
+  width: 100%;
+  max-height: 22rem;
+  object-fit: cover;
+  border-radius: var(--radius);
+  margin-bottom: 1.75rem;
+  background: var(--bg-soft);
+}
+
+/* On a narrow screen the text needs the width more than the picture does. */
+@media (max-width: 34rem) {
+  .post-thumb { display: none; }
+}
+
 /* ---------- article ---------- */
 
 article header { margin-bottom: 2rem; }

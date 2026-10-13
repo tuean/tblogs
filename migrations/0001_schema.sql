@@ -21,7 +21,12 @@ CREATE TABLE posts (
     source_path  TEXT    NOT NULL UNIQUE,
 
     -- Source file modification time in nanoseconds since the epoch.
-    source_mtime INTEGER NOT NULL
+    source_mtime INTEGER NOT NULL,
+
+    -- Cover image as written in front matter (`image:`), usually a remote URL.
+    -- Stored verbatim; the renderer resolves it so a local path becomes a
+    -- /media/... URL.
+    cover_image  TEXT
 );
 
 -- The public index lists only published posts, newest first.

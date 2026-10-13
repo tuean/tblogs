@@ -23,6 +23,8 @@ pub struct Post {
     /// Always present: every post in a package comes from a file. The server
     /// uses it to resolve that post's relative image references.
     pub source_path: String,
+    /// Cover image URL, ready to use as written in a template.
+    pub cover_image: Option<String>,
 }
 
 impl Post {
@@ -55,6 +57,7 @@ impl<'r> sqlx::FromRow<'r, SqliteRow> for Post {
             updated_at: row.try_get("updated_at")?,
             published_at: row.try_get("published_at")?,
             source_path: row.try_get("source_path")?,
+            cover_image: row.try_get("cover_image")?,
         })
     }
 }
@@ -79,6 +82,9 @@ pub struct SourcedPost {
     /// The file's modification time as an ISO-8601 string.
     pub updated_at: String,
     pub tags: Vec<String>,
+    /// Cover image exactly as the front matter wrote it; the renderer resolves
+    /// it so a local path becomes a `/media/...` URL.
+    pub cover_image: Option<String>,
 }
 
 /// A date for display, in the machine's time zone.
@@ -189,6 +195,10 @@ pub struct PostView {
     pub body_html: String,
     pub date: String,
     pub tags: Vec<Tag>,
+    /// Resolved cover image URL, empty when the post has none. Kept as an
+    /// empty string rather than an `Option` so templates stay free of
+    /// unwrapping.
+    pub cover: String,
 }
 
 /// Clean up tag names coming from front matter.
@@ -255,6 +265,7 @@ mod tests {
             updated_at: updated_at.to_string(),
             published_at: published_at.map(str::to_string),
             source_path: "post.md".into(),
+            cover_image: None,
         }
     }
 

@@ -25,7 +25,7 @@ use crate::{
 macro_rules! post_columns {
     () => {
         "id, slug, title, summary, body_md, published, created_at, updated_at, \
-         published_at, source_path"
+         published_at, source_path, cover_image"
     };
 }
 
@@ -36,7 +36,7 @@ macro_rules! post_columns {
 macro_rules! post_columns_p {
     () => {
         "p.id, p.slug, p.title, p.summary, p.body_md, p.published, \
-         p.created_at, p.updated_at, p.published_at, p.source_path"
+         p.created_at, p.updated_at, p.published_at, p.source_path, p.cover_image"
     };
 }
 
@@ -476,7 +476,7 @@ pub async fn sync_sourced_post(pool: &SqlitePool, input: &SourcedPost) -> Result
                 "UPDATE posts
                     SET slug = ?, title = ?, summary = ?, body_md = ?, published = ?,
                         created_at = ?, updated_at = ?, published_at = ?,
-                        source_mtime = ?
+                        source_mtime = ?, cover_image = ?
                   WHERE id = ?",
             )
             .bind(&slug)
@@ -488,6 +488,7 @@ pub async fn sync_sourced_post(pool: &SqlitePool, input: &SourcedPost) -> Result
             .bind(&input.updated_at)
             .bind(&published_at)
             .bind(input.source_mtime)
+            .bind(&input.cover_image)
             .bind(post.id)
             .execute(&mut *tx)
             .await?;
@@ -498,8 +499,8 @@ pub async fn sync_sourced_post(pool: &SqlitePool, input: &SourcedPost) -> Result
             let result = sqlx::query(
                 "INSERT INTO posts
                      (slug, title, summary, body_md, published, created_at, updated_at,
-                      published_at, source_path, source_mtime)
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                      published_at, source_path, source_mtime, cover_image)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             )
             .bind(&slug)
             .bind(&input.title)
@@ -511,6 +512,7 @@ pub async fn sync_sourced_post(pool: &SqlitePool, input: &SourcedPost) -> Result
             .bind(&published_at)
             .bind(&input.source_path)
             .bind(input.source_mtime)
+            .bind(&input.cover_image)
             .execute(&mut *tx)
             .await?;
 
@@ -700,6 +702,7 @@ mod tests {
             date_hint: None,
             updated_at: now_iso(),
             tags: normalise_tags(&names),
+            cover_image: None,
         }
     }
 

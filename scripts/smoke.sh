@@ -134,6 +134,10 @@ tags: [嵌套]
 ![diagram](nested.assets/diagram.png)
 EOF
 
+# A CRLF document with a cover, which is what an editor on Windows produces.
+# Regression: the body offset used to drift on CRLF and panic on multi-byte text.
+printf -- '---\r\ntitle: CRLF 文档\r\nimage: https://cdn.example.com/cover.jpg\r\n---\r\n\r\n# 正文\r\n\r\nWindows 换行。\r\n' > "$CONTENT/crlf.md"
+
 cat > "$CONTENT/draft.md" <<'EOF'
 ---
 title: 草稿
@@ -238,6 +242,15 @@ home="$(body "$BASE/")"
 check_contains "a file's # heading became the title" "你好，内容目录" "$home"
 check_contains "tags from front matter were applied" "图片" "$home"
 check "a draft is not reachable" "404" "$(status "$BASE/posts/draft")"
+
+# A CRLF document must import, and its cover must render.
+check "a CRLF document was imported" "200" "$(status "$BASE/posts/crlf")"
+check_contains "a CRLF body parsed past the front matter" "Windows 换行" "$(body "$BASE/posts/crlf")"
+check_contains "the cover from front matter is rendered" \
+  'class="post-hero" src="https://cdn.example.com/cover.jpg"' "$(body "$BASE/posts/crlf")"
+check_contains "the cover also appears as an index thumbnail" \
+  'class="post-thumb"' "$(body "$BASE/")"
+check_missing "front matter does not leak into the body" "title: CRLF" "$(body "$BASE/posts/crlf")"
 check_missing "a draft is not in the index" "不应出现在公开页面" "$home"
 
 echo
