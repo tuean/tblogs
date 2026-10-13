@@ -11,7 +11,7 @@
 
 use askama::Template;
 
-use crate::models::{PostFormView, PostView, Tag, TagCount};
+use crate::models::{PostView, TagCount};
 
 #[derive(Template)]
 #[template(path = "index.html")]
@@ -57,61 +57,6 @@ pub struct TagTemplate {
     pub prev_href: String,
     pub next_href: String,
 }
-
-/// One row of the admin list.
-#[derive(Debug, Clone)]
-pub struct AdminPostRow {
-    pub id: i64,
-    pub title: String,
-    pub slug: String,
-    pub published: bool,
-    pub date: String,
-    pub tags: Vec<Tag>,
-    /// False when the post is owned by a file on disk, in which case the web
-    /// admin shows it as read-only rather than offering controls that the next
-    /// sync would undo.
-    pub editable: bool,
-    /// Where the post comes from: the source file path, or a label for a post
-    /// created in the web admin.
-    pub source_label: String,
-}
-
-#[derive(Template)]
-#[template(path = "admin_list.html")]
-pub struct AdminListTemplate {
-    pub site_title: String,
-    pub site_description: String,
-    pub posts: Vec<AdminPostRow>,
-    /// Whether the admin surface is behind a token, shown as a hint.
-    pub gated: bool,
-    /// Result of the most recent sync, when one was just requested.
-    pub notice: String,
-    /// The configured content directory, empty when file-backed mode is off.
-    pub content_dir: String,
-}
-
-#[derive(Template)]
-#[template(path = "admin_form.html")]
-pub struct AdminFormTemplate {
-    pub site_title: String,
-    pub site_description: String,
-    pub form: PostFormView,
-    pub is_new: bool,
-    /// Where the form posts to; differs between create and edit.
-    pub action: String,
-    /// Validation message; empty when there is nothing to report.
-    pub error: String,
-}
-
-#[derive(Template)]
-#[template(path = "admin_login.html")]
-pub struct AdminLoginTemplate {
-    pub site_title: String,
-    pub site_description: String,
-    /// Login failure message; empty when there is nothing to report.
-    pub error: String,
-}
-
 /// One entry of the RSS feed.
 #[derive(Debug, Clone)]
 pub struct FeedItem {

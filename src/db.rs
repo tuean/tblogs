@@ -8,7 +8,6 @@
 use std::{
     collections::HashMap,
     path::{Path, PathBuf},
-    str::FromStr,
 };
 
 use anyhow::{Context, Result};
@@ -18,9 +17,7 @@ use sqlx::{
 };
 
 use crate::{
-    config::Config,
-    markdown,
-    models::{Post, PostForm, SourcedPost, Tag, TagCount},
+    models::{Post, Settings, SourcedPost, Tag, TagCount},
     slug,
 };
 
@@ -49,17 +46,46 @@ pub fn now_iso() -> String {
 }
 
 /// Compact local timestamp, used to build a fallback slug.
-fn fallback_seed() -> String {
-    chrono::Local::now().format("%Y%m%d%H%M%S").to_string()
+/// Read-only is the whole point of the split. The server owns no content, so it
+/// must not be able to create, alter or corrupt it — not even by accident.
+///
+/// The published file is deliberately a plain rollback-journal database with no
+/// write-ahead log: opening a WAL database read-only needs write access to the
+/// `-shm` file, which a read-only deployment cannot be relied on to have. See
+/// [`finalize_package`].
+pub async fn open_read_only(path: &Path) -> Result<SqlitePool> {
+    if !path.is_file() {
+        anyhow::bail!("cannot open {}: file not found", path.display());
+    }
+
+    let options = SqliteConnectOptions::new()
+        .filename(path)
+        .read_only(true)
+        .foreign_keys(true);
+
+    let pool = SqlitePoolOptions::new()
+        .max_connections(5)
+        .connect_with(options)
+        .await
+        .with_context(|| format!("could not open {} read-only", path.display()))?;
+
+    Ok(pool)
 }
 
-/// Open the database, creating the file and parent directory if needed, then
-/// apply any pending migrations.
-pub async fn init(cfg: &Config) -> Result<SqlitePool> {
-    ensure_parent_dir(&cfg.database_url)?;
+/// Open (or create) the database used while building a package.
+///
+/// Write-ahead logging makes the import fast; [`finalize_package`] converts the
+/// result back to a single self-contained file afterwards.
+pub async fn open_for_build(path: &Path) -> Result<SqlitePool> {
+    if let Some(parent) = path.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("could not create {}", parent.display()))?;
+    }
 
-    let options = SqliteConnectOptions::from_str(&cfg.database_url)
-        .with_context(|| format!("invalid TBLOGS_DATABASE_URL: {}", cfg.database_url))?
+    let options = SqliteConnectOptions::new()
+        .filename(path)
         .create_if_missing(true)
         .journal_mode(SqliteJournalMode::Wal)
         // Required for the ON DELETE CASCADE on post_tags to actually fire.
@@ -69,11 +95,103 @@ pub async fn init(cfg: &Config) -> Result<SqlitePool> {
         .max_connections(5)
         .connect_with(options)
         .await
-        .context("could not open the SQLite database")?;
+        .with_context(|| format!("could not open {} for building", path.display()))?;
 
     apply_migrations(&pool).await?;
 
     Ok(pool)
+}
+
+/// Turn a freshly built database into a single portable file.
+///
+/// Folds the write-ahead log back into the main file, switches to the rollback
+/// journal so the result can be opened read-only, and compacts it.
+///
+/// Takes a path rather than a pool on purpose: changing `journal_mode` needs
+/// exclusive access, so every other connection — including the one the build
+/// was using — has to be closed first. This opens its own single connection and
+/// closes it again.
+pub async fn finalize_package(path: &Path) -> Result<()> {
+    let options = SqliteConnectOptions::new().filename(path);
+    let pool = SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect_with(options)
+        .await
+        .with_context(|| format!("could not reopen {} to finalize it", path.display()))?;
+
+    let result = finalize_on(&pool).await;
+    pool.close().await;
+    result
+}
+
+async fn finalize_on(pool: &SqlitePool) -> Result<()> {
+    sqlx::query("PRAGMA wal_checkpoint(TRUNCATE)")
+        .execute(pool)
+        .await
+        .context("could not checkpoint the write-ahead log")?;
+
+    // `journal_mode` reports the resulting mode as a row, so it has to be
+    // queried rather than executed.
+    let (mode,): (String,) = sqlx::query_as("PRAGMA journal_mode = DELETE")
+        .fetch_one(pool)
+        .await
+        .context("could not switch the journal mode")?;
+
+    if !mode.eq_ignore_ascii_case("delete") {
+        anyhow::bail!("could not switch the journal mode; still {mode}");
+    }
+
+    sqlx::query("VACUUM")
+        .execute(pool)
+        .await
+        .context("vacuum failed")?;
+
+    Ok(())
+}
+
+/// Read the site settings stored in a package.
+pub async fn load_settings(pool: &SqlitePool) -> Result<Settings> {
+    let rows: Vec<(String, String)> = sqlx::query_as("SELECT key, value FROM settings")
+        .fetch_all(pool)
+        .await
+        .context("could not read the settings table")?;
+
+    let mut settings = Settings::default();
+    for (key, value) in rows {
+        match key.as_str() {
+            "site_title" => settings.site_title = value,
+            "site_description" => settings.site_description = value,
+            "site_url" => settings.site_url = value.trim_end_matches('/').to_string(),
+            "built_at" => settings.built_at = value,
+            _ => {}
+        }
+    }
+
+    Ok(settings)
+}
+
+/// Write the site settings into a package being built.
+pub async fn save_settings(pool: &SqlitePool, settings: &Settings) -> Result<()> {
+    let mut tx = pool.begin().await?;
+
+    for (key, value) in [
+        ("site_title", settings.site_title.as_str()),
+        ("site_description", settings.site_description.as_str()),
+        ("site_url", settings.site_url.as_str()),
+        ("built_at", settings.built_at.as_str()),
+    ] {
+        sqlx::query(
+            "INSERT INTO settings (key, value) VALUES (?, ?)
+             ON CONFLICT (key) DO UPDATE SET value = excluded.value",
+        )
+        .bind(key)
+        .bind(value)
+        .execute(&mut *tx)
+        .await?;
+    }
+
+    tx.commit().await?;
+    Ok(())
 }
 
 /// Apply every pending migration.
@@ -134,30 +252,6 @@ fn migrations_dir() -> Result<PathBuf> {
         .join(", ");
 
     anyhow::bail!("no migrations directory found; looked in: {looked_in}")
-}
-
-/// Create the directory holding the SQLite file, so a fresh clone works
-/// without a manual `mkdir data`.
-fn ensure_parent_dir(database_url: &str) -> Result<()> {
-    let without_scheme = database_url
-        .strip_prefix("sqlite://")
-        .or_else(|| database_url.strip_prefix("sqlite:"))
-        .unwrap_or(database_url);
-
-    let path = without_scheme.split('?').next().unwrap_or(without_scheme);
-
-    if path.is_empty() || path == ":memory:" {
-        return Ok(());
-    }
-
-    if let Some(parent) = Path::new(path).parent()
-        && !parent.as_os_str().is_empty()
-    {
-        std::fs::create_dir_all(parent)
-            .with_context(|| format!("could not create {}", parent.display()))?;
-    }
-
-    Ok(())
 }
 
 // ---------------------------------------------------------------- queries
@@ -316,126 +410,7 @@ pub async fn count_published_by_tag(pool: &SqlitePool, tag_slug: &str) -> Result
 
 // ---------------------------------------------------------------- writes
 
-/// Insert a post, returning its new id.
-pub async fn create_post(pool: &SqlitePool, form: &PostForm) -> Result<i64> {
-    let now = now_iso();
-    let summary = effective_summary(form);
-
-    let base = if form.slug.trim().is_empty() {
-        slug::slugify_or(&form.title, &fallback_seed())
-    } else {
-        slug::slugify_or(&form.slug, &fallback_seed())
-    };
-    let slug = unique_post_slug(pool, &base, None).await?;
-
-    let published = form.is_publish();
-    let published_at = published.then(|| now.clone());
-
-    let mut tx = pool.begin().await?;
-
-    let result = sqlx::query(
-        "INSERT INTO posts
-             (slug, title, summary, body_md, published, created_at, updated_at, published_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-    )
-    .bind(&slug)
-    .bind(form.title.trim())
-    .bind(&summary)
-    .bind(&form.body_md)
-    .bind(published)
-    .bind(&now)
-    .bind(&now)
-    .bind(&published_at)
-    .execute(&mut *tx)
-    .await?;
-
-    let id = result.last_insert_rowid();
-    sync_tags(&mut tx, id, &form.tag_names()).await?;
-
-    tx.commit().await?;
-    Ok(id)
-}
-
-/// Update an existing post.
-pub async fn update_post(pool: &SqlitePool, id: i64, form: &PostForm) -> Result<()> {
-    let existing = find_by_id(pool, id)
-        .await?
-        .with_context(|| format!("post {id} no longer exists"))?;
-
-    let now = now_iso();
-    let summary = effective_summary(form);
-
-    let base = if form.slug.trim().is_empty() {
-        let derived = slug::slugify(&form.title);
-        if derived.is_empty() {
-            existing.slug.clone()
-        } else {
-            derived
-        }
-    } else {
-        slug::slugify_or(&form.slug, &existing.slug)
-    };
-    let slug = unique_post_slug(pool, &base, Some(id)).await?;
-
-    let published = form.is_publish();
-
-    // Stamp published_at the first time a post goes live, preserve it on
-    // subsequent edits, and clear it when the post is pulled back to draft.
-    let published_at = match (published, existing.published_at.clone()) {
-        (true, Some(ts)) => Some(ts),
-        (true, None) => Some(now.clone()),
-        (false, _) => None,
-    };
-
-    let mut tx = pool.begin().await?;
-
-    sqlx::query(
-        "UPDATE posts
-            SET slug = ?, title = ?, summary = ?, body_md = ?,
-                published = ?, updated_at = ?, published_at = ?
-          WHERE id = ?",
-    )
-    .bind(&slug)
-    .bind(form.title.trim())
-    .bind(&summary)
-    .bind(&form.body_md)
-    .bind(published)
-    .bind(&now)
-    .bind(&published_at)
-    .bind(id)
-    .execute(&mut *tx)
-    .await?;
-
-    sync_tags(&mut tx, id, &form.tag_names()).await?;
-
-    tx.commit().await?;
-    Ok(())
-}
-
-/// Publish or unpublish a post without touching its content.
-pub async fn set_published(pool: &SqlitePool, id: i64, published: bool) -> Result<()> {
-    let existing = find_by_id(pool, id)
-        .await?
-        .with_context(|| format!("post {id} no longer exists"))?;
-
-    let now = now_iso();
-    let published_at = if published {
-        existing.published_at.or_else(|| Some(now.clone()))
-    } else {
-        None
-    };
-
-    sqlx::query("UPDATE posts SET published = ?, published_at = ?, updated_at = ? WHERE id = ?")
-        .bind(published)
-        .bind(published_at)
-        .bind(&now)
-        .bind(id)
-        .execute(pool)
-        .await?;
-
-    Ok(())
-}
-
+/// Remove a post and any tags it left orphaned.
 pub async fn delete_post(pool: &SqlitePool, id: i64) -> Result<()> {
     let mut tx = pool.begin().await?;
 
@@ -570,38 +545,22 @@ pub async fn find_by_source(pool: &SqlitePool, source_path: &str) -> Result<Opti
 ///
 /// Used to skip files whose modification time has not changed.
 pub async fn list_source_mtimes(pool: &SqlitePool) -> Result<Vec<(String, i64)>> {
-    let rows: Vec<(String, Option<i64>)> =
-        sqlx::query_as("SELECT source_path, source_mtime FROM posts WHERE source_path IS NOT NULL")
-            .fetch_all(pool)
-            .await?;
-
-    Ok(rows
-        .into_iter()
-        .map(|(path, mtime)| (path, mtime.unwrap_or(0)))
-        .collect())
-}
-
-/// `(id, source_path)` for every imported post.
-pub async fn list_sourced_posts(pool: &SqlitePool) -> Result<Vec<(i64, String)>> {
-    let rows: Vec<(i64, String)> =
-        sqlx::query_as("SELECT id, source_path FROM posts WHERE source_path IS NOT NULL")
-            .fetch_all(pool)
-            .await?;
+    let rows: Vec<(String, i64)> = sqlx::query_as("SELECT source_path, source_mtime FROM posts")
+        .fetch_all(pool)
+        .await?;
 
     Ok(rows)
 }
 
-/// Summary to store: the author's own text, or one derived from the body.
-fn effective_summary(form: &PostForm) -> String {
-    let provided = form.summary.trim();
-    if provided.is_empty() {
-        markdown::excerpt(&form.body_md, 160)
-    } else {
-        provided.to_string()
-    }
+/// `(id, source_path)` for every post, used to detect deleted files.
+pub async fn list_sourced_posts(pool: &SqlitePool) -> Result<Vec<(i64, String)>> {
+    let rows: Vec<(i64, String)> = sqlx::query_as("SELECT id, source_path FROM posts")
+        .fetch_all(pool)
+        .await?;
+
+    Ok(rows)
 }
 
-/// Replace a post's tag links, creating tags as needed.
 async fn sync_tags(conn: &mut SqliteConnection, post_id: i64, names: &[String]) -> Result<()> {
     sqlx::query("DELETE FROM post_tags WHERE post_id = ?")
         .bind(post_id)
@@ -696,133 +655,14 @@ async fn unique_post_slug(
     }
 }
 
-// ---------------------------------------------------------------- demo data
-
-/// Insert sample posts when the database is empty and seeding is enabled.
-pub async fn seed_demo_if_enabled(pool: &SqlitePool, cfg: &Config) -> Result<usize> {
-    if !cfg.seed_demo {
-        return Ok(0);
-    }
-
-    let (existing,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM posts")
-        .fetch_one(pool)
-        .await?;
-
-    if existing > 0 {
-        return Ok(0);
-    }
-
-    for (title, summary, tags, body) in DEMO_POSTS {
-        let form = PostForm {
-            title: (*title).to_string(),
-            slug: String::new(),
-            summary: (*summary).to_string(),
-            body_md: (*body).to_string(),
-            tags: (*tags).to_string(),
-            status: "published".to_string(),
-        };
-        create_post(pool, &form).await?;
-    }
-
-    Ok(DEMO_POSTS.len())
-}
-
-/// `(title, summary, tags, body_markdown)`
-type DemoPost = (&'static str, &'static str, &'static str, &'static str);
-
-const DEMO_POSTS: &[DemoPost] = &[
-    (
-        "你好，世界",
-        "第一篇文章，用来验证中文标题、中文 slug 与 Markdown 渲染。",
-        "随笔, Rust",
-        r#"# 你好，世界
-
-这是 **tblogs** 的第一篇文章。它同时验证了三件事：
-
-1. 中文标题能生成可用的 URL slug；
-2. Markdown 会被渲染成 HTML；
-3. 标签能正确关联并出现在列表页。
-
-## 为什么用 Rust 写博客
-
-单文件二进制、无运行时依赖、内存安全。对于一台放在家里的小机器来说，
-这些都是很实际的好处。
-
-> 站点的所有内容都存在一个 SQLite 文件里，备份就是复制一个文件。
-
-行内代码长这样：`cargo run`。
-"#,
-    ),
-    (
-        "Markdown 渲染能力一览",
-        "表格、代码块、引用、任务列表——本文用来检查渲染器的各项扩展。",
-        "Markdown, 功能",
-        r#"# Markdown 渲染能力一览
-
-## 表格
-
-| 功能 | 状态 |
-|------|------|
-| 文章 CRUD | 已完成 |
-| Markdown 渲染 | 已完成 |
-| 标签 | 已完成 |
-| RSS | 已完成 |
-
-## 代码块
-
-```rust
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
-    let pool = db::init(&cfg).await?;
-    serve(pool).await
-}
-```
-
-## 引用与列表
-
-> 简单的系统更容易长期维护。
-
-- [x] 数据库迁移
-- [x] 分页
-- [ ] 图片上传（未在本次范围内）
-
-~~删除线~~ 与 **粗体**、*斜体*。
-"#,
-    ),
-    (
-        "部署与 DDNS 的注意事项",
-        "从内网到公网需要满足哪些条件，以及为什么企业网络通常做不到。",
-        "部署, 运维",
-        r#"# 部署与 DDNS 的注意事项
-
-把服务映射到公网，需要同时满足三个条件：
-
-1. 你**拥有**一个公网 IP（而不是运营商 NAT 之后的共享出口）；
-2. 你能在**拥有该公网 IP 的路由器**上配置端口转发；
-3. 运营商没有封禁 80/443 等入站端口。
-
-DDNS 只解决第 1 条里「IP 会变」的问题——它负责把域名指向当前 IP，
-**并不负责**端口转发，也无法绕过运营商 NAT。
-
-## 企业网络为什么不行
-
-办公网络里，你看到的公网 IP 属于公司的 NAT 出口，由整栋楼共用：
-
-- 你没有那台出口设备的配置权限；
-- 企业防火墙默认丢弃外部发起的入站连接；
-- 让办公电脑对公网提供服务，通常违反公司安全策略。
-
-更合适的做法是把服务部署到云主机，或使用反向隧道，详见仓库的
-`deploy/` 目录。
-"#,
-    ),
-];
-
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use std::str::FromStr;
 
-    /// An in-memory database with migrations applied.
+    use super::*;
+    use crate::models::normalise_tags;
+
+    /// An in-memory database with the schema applied.
     async fn test_pool() -> SqlitePool {
         let pool = SqlitePoolOptions::new()
             .max_connections(1)
@@ -838,26 +678,46 @@ mod tests {
         pool
     }
 
-    fn form(title: &str, body: &str, tags: &str, published: bool) -> PostForm {
-        PostForm {
-            title: title.into(),
-            slug: String::new(),
-            summary: String::new(),
-            body_md: body.into(),
-            tags: tags.into(),
-            status: if published { "published" } else { "draft" }.into(),
+    /// A post as the build step would produce it.
+    ///
+    /// The summary is derived the same way `content::build_post` does it, since
+    /// that is now the only place summaries are made.
+    fn sourced(source: &str, title: &str, body: &str, tags: &str, published: bool) -> SourcedPost {
+        let names: Vec<String> = tags
+            .split(',')
+            .map(|name| name.trim().to_string())
+            .filter(|name| !name.is_empty())
+            .collect();
+
+        SourcedPost {
+            source_path: source.to_string(),
+            source_mtime: 1,
+            title: title.to_string(),
+            slug_base: slug::slugify(source.trim_end_matches(".md")),
+            summary: crate::markdown::excerpt(body, 160),
+            body_md: body.to_string(),
+            published,
+            date_hint: None,
+            updated_at: now_iso(),
+            tags: normalise_tags(&names),
         }
     }
 
+    /// Import a post and return its id.
+    async fn import(pool: &SqlitePool, post: &SourcedPost) -> i64 {
+        sync_sourced_post(pool, post).await.unwrap();
+        find_by_source(pool, &post.source_path)
+            .await
+            .unwrap()
+            .unwrap()
+            .id
+    }
+
     #[tokio::test]
-    async fn draft_posts_stay_out_of_the_public_list() {
+    async fn drafts_stay_out_of_the_public_list() {
         let pool = test_pool().await;
-        create_post(&pool, &form("公开", "# hi", "", true))
-            .await
-            .unwrap();
-        create_post(&pool, &form("草稿", "# hi", "", false))
-            .await
-            .unwrap();
+        import(&pool, &sourced("live.md", "公开", "# hi", "", true)).await;
+        import(&pool, &sourced("draft.md", "草稿", "# hi", "", false)).await;
 
         let listed = list_published(&pool, 10, 0).await.unwrap();
         assert_eq!(listed.len(), 1);
@@ -867,30 +727,35 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn duplicate_slugs_are_disambiguated() {
+    async fn duplicate_slug_bases_are_disambiguated() {
         let pool = test_pool().await;
-        let first = create_post(&pool, &form("Same Title", "a", "", true))
-            .await
-            .unwrap();
-        let second = create_post(&pool, &form("Same Title", "b", "", true))
-            .await
-            .unwrap();
 
-        let a = find_by_id(&pool, first).await.unwrap().unwrap();
-        let b = find_by_id(&pool, second).await.unwrap().unwrap();
+        // Two files whose derived slug would collide.
+        let mut first = sourced("a/post.md", "Same", "a", "", true);
+        let mut second = sourced("b/post.md", "Same", "b", "", true);
+        first.slug_base = "same".into();
+        second.slug_base = "same".into();
 
-        assert_eq!(a.slug, "same-title");
-        assert_eq!(b.slug, "same-title-2");
+        let first_id = import(&pool, &first).await;
+        let second_id = import(&pool, &second).await;
+
+        let a = find_by_id(&pool, first_id).await.unwrap().unwrap();
+        let b = find_by_id(&pool, second_id).await.unwrap().unwrap();
+
+        assert_eq!(a.slug, "same");
+        assert_eq!(b.slug, "same-2");
     }
 
     #[tokio::test]
-    async fn cjk_titles_produce_a_reachable_slug() {
+    async fn cjk_slugs_are_reachable() {
         let pool = test_pool().await;
-        let id = create_post(&pool, &form("我的第一篇博客", "正文", "", true))
-            .await
-            .unwrap();
-        let post = find_by_id(&pool, id).await.unwrap().unwrap();
+        let id = import(
+            &pool,
+            &sourced("我的第一篇博客.md", "标题", "正文", "", true),
+        )
+        .await;
 
+        let post = find_by_id(&pool, id).await.unwrap().unwrap();
         assert_eq!(post.slug, "我的第一篇博客");
         assert!(
             find_published_by_slug(&pool, "我的第一篇博客")
@@ -903,9 +768,11 @@ mod tests {
     #[tokio::test]
     async fn tags_are_linked_and_orphans_are_cleaned_up() {
         let pool = test_pool().await;
-        let id = create_post(&pool, &form("有标签", "正文", "rust, axum", true))
-            .await
-            .unwrap();
+        let id = import(
+            &pool,
+            &sourced("tagged.md", "有标签", "正文", "rust, axum", true),
+        )
+        .await;
 
         let counts = list_tags_with_counts(&pool).await.unwrap();
         assert_eq!(counts.len(), 2);
@@ -920,11 +787,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn published_at_is_stamped_then_cleared() {
+    async fn publishing_stamps_the_date_and_unpublishing_clears_it() {
         let pool = test_pool().await;
-        let id = create_post(&pool, &form("草稿", "正文", "", false))
-            .await
-            .unwrap();
+
+        let draft = sourced("d.md", "草稿", "正文", "", false);
+        let id = import(&pool, &draft).await;
         assert!(
             find_by_id(&pool, id)
                 .await
@@ -934,11 +801,19 @@ mod tests {
                 .is_none()
         );
 
-        set_published(&pool, id, true).await.unwrap();
-        let stamped = find_by_id(&pool, id).await.unwrap().unwrap().published_at;
-        assert!(stamped.is_some());
+        // The same file, now published. A date hint from front matter or the
+        // file name would be used; here it falls back to "now".
+        let mut live = draft.clone();
+        live.published = true;
+        sync_sourced_post(&pool, &live).await.unwrap();
 
-        set_published(&pool, id, false).await.unwrap();
+        let stamped = find_by_id(&pool, id).await.unwrap().unwrap().published_at;
+        assert!(stamped.is_some(), "publishing should stamp the date");
+
+        // And back to a draft.
+        let mut again = draft.clone();
+        again.published = false;
+        sync_sourced_post(&pool, &again).await.unwrap();
         assert!(
             find_by_id(&pool, id)
                 .await
@@ -950,22 +825,93 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn summary_falls_back_to_the_body() {
+    async fn a_date_hint_is_used_for_publication() {
         let pool = test_pool().await;
-        let id = create_post(&pool, &form("标题", "## 小标题\n\n正文内容。", "", true))
-            .await
-            .unwrap();
+
+        let mut post = sourced("dated.md", "有日期", "正文", "", true);
+        post.date_hint = Some("2026-03-04T05:06:07Z".to_string());
+
+        let id = import(&pool, &post).await;
+        let stored = find_by_id(&pool, id).await.unwrap().unwrap();
+
+        assert_eq!(stored.published_at.as_deref(), Some("2026-03-04T05:06:07Z"));
+        // created_at follows the same hint, so a feed keeps its order.
+        assert_eq!(stored.created_at, "2026-03-04T05:06:07Z");
+    }
+
+    #[tokio::test]
+    async fn resyncing_the_same_source_updates_rather_than_duplicating() {
+        let pool = test_pool().await;
+
+        let first = sourced("post.md", "Before", "old body", "", true);
+        let id = import(&pool, &first).await;
+
+        let mut second = sourced("post.md", "After", "new body", "tag", true);
+        second.source_mtime = 2;
+
+        let outcome = sync_sourced_post(&pool, &second).await.unwrap();
+        assert_eq!(outcome, SyncOutcome::Updated);
+
+        assert_eq!(list_all(&pool).await.unwrap().len(), 1);
         let post = find_by_id(&pool, id).await.unwrap().unwrap();
-        assert_eq!(post.summary, "小标题 正文内容。");
+        assert_eq!(post.title, "After");
+        assert_eq!(post.body_md, "new body");
+
+        // The stored modification time moved too, so the next build can skip it.
+        let mtimes = list_source_mtimes(&pool).await.unwrap();
+        assert_eq!(mtimes, vec![("post.md".to_string(), 2)]);
+    }
+
+    #[tokio::test]
+    async fn publication_date_survives_an_edit() {
+        let pool = test_pool().await;
+
+        let mut first = sourced("post.md", "Title", "body", "", true);
+        first.date_hint = Some("2026-01-01T00:00:00Z".to_string());
+        let id = import(&pool, &first).await;
+
+        // Editing must not shuffle the post to the top of the feed.
+        let mut second = sourced("post.md", "Title v2", "body v2", "", true);
+        second.source_mtime = 2;
+        sync_sourced_post(&pool, &second).await.unwrap();
+
+        let post = find_by_id(&pool, id).await.unwrap().unwrap();
+        assert_eq!(post.published_at.as_deref(), Some("2026-01-01T00:00:00Z"));
+    }
+
+    #[tokio::test]
+    async fn settings_round_trip_through_the_database() {
+        let pool = test_pool().await;
+
+        // A database with no settings row still yields usable defaults.
+        let defaults = load_settings(&pool).await.unwrap();
+        assert!(!defaults.site_title.is_empty());
+
+        let settings = Settings {
+            site_title: "标题".into(),
+            site_description: "描述".into(),
+            site_url: "https://example.test".into(),
+            built_at: "2026-01-01T00:00:00Z".into(),
+        };
+        save_settings(&pool, &settings).await.unwrap();
+
+        // Saving twice must update rather than duplicate.
+        save_settings(&pool, &settings).await.unwrap();
+        assert_eq!(load_settings(&pool).await.unwrap(), settings);
     }
 
     #[tokio::test]
     async fn pagination_slices_the_result_set() {
         let pool = test_pool().await;
         for i in 0..5 {
-            create_post(&pool, &form(&format!("文章 {i}"), "正文", "", true))
-                .await
-                .unwrap();
+            let post = sourced(
+                &format!("post-{i}.md"),
+                &format!("文章 {i}"),
+                "正文",
+                "",
+                true,
+            );
+            import(&pool, &post).await;
         }
 
         assert_eq!(list_published(&pool, 2, 0).await.unwrap().len(), 2);

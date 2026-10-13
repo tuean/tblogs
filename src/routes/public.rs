@@ -32,20 +32,22 @@ pub async fn index(
     State(state): State<AppState>,
     Query(query): Query<PageQuery>,
 ) -> Result<Html<String>, AppError> {
-    let total = db::count_published(&state.pool).await?;
-    let page = paginate(query.page, total, state.cfg.page_size, "/");
+    let snapshot = state.current().await;
 
-    let posts = db::list_published(&state.pool, state.cfg.page_size, page.offset).await?;
-    let tag_map = db::tags_by_post(&state.pool).await?;
+    let total = db::count_published(&snapshot.pool).await?;
+    let page = paginate(query.page, total, state.page_size, "/");
+
+    let posts = db::list_published(&snapshot.pool, state.page_size, page.offset).await?;
+    let tag_map = db::tags_by_post(&snapshot.pool).await?;
 
     let posts = posts
         .into_iter()
-        .map(|post| to_view(post, &tag_map, false, None))
+        .map(|post| to_view(post, &tag_map, false, &state.assets))
         .collect();
 
     super::render(&IndexTemplate {
-        site_title: state.cfg.site_title.clone(),
-        site_description: state.cfg.site_description.clone(),
+        site_title: snapshot.title(),
+        site_description: snapshot.description(),
         posts,
         page: page.page,
         total_pages: page.total_pages,
@@ -61,26 +63,30 @@ pub async fn post_detail(
     State(state): State<AppState>,
     Path(slug): Path<String>,
 ) -> Result<Html<String>, AppError> {
-    let post = db::find_published_by_slug(&state.pool, &slug)
-        .await?
-        .ok_or_else(|| AppError::not_found(format!("文章「{slug}」不存在或尚未发布")))?;
+    let snapshot = state.current().await;
 
-    let tag_map = db::tags_by_post(&state.pool).await?;
+    let post = db::find_published_by_slug(&snapshot.pool, &slug)
+        .await?
+        .ok_or_else(|| AppError::not_found(format!("文章「{slug}」不存在")))?;
+
+    let tag_map = db::tags_by_post(&snapshot.pool).await?;
 
     super::render(&PostTemplate {
-        site_title: state.cfg.site_title.clone(),
-        site_description: state.cfg.site_description.clone(),
-        post: to_view(post, &tag_map, true, state.assets.as_ref()),
+        site_title: snapshot.title(),
+        site_description: snapshot.description(),
+        post: to_view(post, &tag_map, true, &state.assets),
     })
 }
 
 /// The tag cloud.
 pub async fn tags_index(State(state): State<AppState>) -> Result<Html<String>, AppError> {
-    let tags = db::list_tags_with_counts(&state.pool).await?;
+    let snapshot = state.current().await;
+
+    let tags = db::list_tags_with_counts(&snapshot.pool).await?;
 
     super::render(&TagsTemplate {
-        site_title: state.cfg.site_title.clone(),
-        site_description: state.cfg.site_description.clone(),
+        site_title: snapshot.title(),
+        site_description: snapshot.description(),
         tags,
     })
 }
@@ -91,30 +97,32 @@ pub async fn tag_detail(
     Path(slug): Path<String>,
     Query(query): Query<PageQuery>,
 ) -> Result<Html<String>, AppError> {
-    let tag = db::find_tag_by_slug(&state.pool, &slug)
+    let snapshot = state.current().await;
+
+    let tag = db::find_tag_by_slug(&snapshot.pool, &slug)
         .await?
         .ok_or_else(|| AppError::not_found(format!("标签「{slug}」不存在")))?;
 
-    let total = db::count_published_by_tag(&state.pool, &tag.slug).await?;
+    let total = db::count_published_by_tag(&snapshot.pool, &tag.slug).await?;
     let page = paginate(
         query.page,
         total,
-        state.cfg.page_size,
+        state.page_size,
         &util::tag_path(&tag.slug),
     );
 
     let posts =
-        db::list_published_by_tag(&state.pool, &tag.slug, state.cfg.page_size, page.offset).await?;
-    let tag_map = db::tags_by_post(&state.pool).await?;
+        db::list_published_by_tag(&snapshot.pool, &tag.slug, state.page_size, page.offset).await?;
+    let tag_map = db::tags_by_post(&snapshot.pool).await?;
 
     let posts = posts
         .into_iter()
-        .map(|post| to_view(post, &tag_map, false, None))
+        .map(|post| to_view(post, &tag_map, false, &state.assets))
         .collect();
 
     super::render(&TagTemplate {
-        site_title: state.cfg.site_title.clone(),
-        site_description: state.cfg.site_description.clone(),
+        site_title: snapshot.title(),
+        site_description: snapshot.description(),
         tag_name: tag.name,
         posts,
         page: page.page,
@@ -126,18 +134,19 @@ pub async fn tag_detail(
     })
 }
 
-/// Liveness probe that also touches the database, so it reports real
-/// readiness rather than merely "the process is up".
+/// Liveness probe that also touches the database, so it reports real readiness
+/// rather than merely "the process is up".
 pub async fn healthz(State(state): State<AppState>) -> Result<&'static str, AppError> {
-    db::count_published(&state.pool).await?;
+    let snapshot = state.current().await;
+    db::count_published(&snapshot.pool).await?;
     Ok("ok")
 }
 
 /// The stylesheet.
 ///
-/// It is embedded at compile time rather than served from disk, which keeps the
-/// deployment to a single binary plus the migrations directory. The templates
-/// are compiled in by askama for the same reason.
+/// Embedded at compile time rather than served from disk, which keeps a
+/// deployment to a binary and a data directory. The templates are compiled in
+/// by askama for the same reason.
 pub async fn stylesheet() -> impl IntoResponse {
     (
         [
@@ -148,21 +157,18 @@ pub async fn stylesheet() -> impl IntoResponse {
     )
 }
 
-/// Serve an image or other asset out of the content directory.
+/// Serve an image or other asset out of the published package.
 ///
 /// Reachable only through [`Assets::path_for`], which rejects traversal, symlink
-/// escapes, dotfiles and any extension outside the allowlist — so the Markdown
-/// sources sitting in the same tree stay private.
+/// escapes, dotfiles and any extension outside the allowlist. The published
+/// layout mirrors the author's directory, so the `/media/...` URLs written at
+/// build time resolve exactly as they did locally.
 pub async fn media(
     State(state): State<AppState>,
     Path(path): Path<String>,
     headers: HeaderMap,
 ) -> Result<Response, AppError> {
-    let Some(assets) = state.assets.as_ref() else {
-        return Err(AppError::not_found("本站未配置内容目录，图片资源不可用"));
-    };
-
-    let Some(file) = assets.path_for(&path) else {
+    let Some(file) = state.assets.path_for(&path) else {
         return Err(AppError::not_found("资源不存在"));
     };
 
@@ -174,7 +180,7 @@ pub async fn media(
         .await
         .map_err(|error| AppError::internal("读取资源失败", error))?;
 
-    // A cheap validator, so a browser can revalidate an edited image instead of
+    // A cheap validator, so a browser can revalidate a replaced image instead of
     // trusting a long max-age.
     let stamp = metadata
         .modified()
@@ -203,8 +209,8 @@ pub async fn media(
             (header::ETAG, etag),
             (header::X_CONTENT_TYPE_OPTIONS, "nosniff".to_string()),
             // An SVG is a document that can carry script. Serving content from
-            // the author's own directory under the site's origin would let it
-            // run there, so scripts are sandboxed away.
+            // the site's own origin would let it run there, so scripts are
+            // sandboxed away.
             (
                 header::CONTENT_SECURITY_POLICY,
                 "default-src 'none'; sandbox".to_string(),
@@ -218,30 +224,23 @@ pub async fn media(
 /// Build a render-ready post.
 ///
 /// `with_body` controls whether the Markdown body is rendered. List pages show
-/// only the stored summary, so rendering every body there would be wasted
-/// work; those views carry an empty `body_html` that their templates never
-/// reference.
+/// only the stored summary, so rendering every body there would be wasted work;
+/// those views carry an empty `body_html` that their templates never reference.
 ///
-/// When `assets` is present and the post came from a file, local image
-/// references are repointed at `/media/...` so they resolve from the article
-/// URL rather than from the directory the file happens to live in.
+/// Local image references are resolved against the post's own source path, which
+/// is why the published asset layout mirrors the author's directory.
 fn to_view(
     post: Post,
     tags: &HashMap<i64, Vec<Tag>>,
     with_body: bool,
-    assets: Option<&Assets>,
+    assets: &Assets,
 ) -> PostView {
     let date = post.display_date();
 
-    let body_html = if !with_body {
-        String::new()
+    let body_html = if with_body {
+        markdown::render_with_assets(&post.body_md, assets, &post.source_path)
     } else {
-        match (assets, post.source_path.as_deref()) {
-            (Some(assets), Some(source_rel)) => {
-                markdown::render_with_assets(&post.body_md, assets, source_rel)
-            }
-            _ => markdown::render(&post.body_md),
-        }
+        String::new()
     };
 
     let tags = tags.get(&post.id).cloned().unwrap_or_default();

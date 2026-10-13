@@ -1,42 +1,80 @@
 #!/usr/bin/env bash
 #
-# End-to-end smoke test for tblogs.
+# End-to-end test for the split architecture.
 #
-# Exercises every route against a running instance, including the full admin
-# create -> publish -> unpublish -> delete lifecycle. Exits non-zero if any
-# check fails, so it can gate a deployment.
+# Runs the whole story the way an author would:
 #
-# Usage:
-#   ./scripts/smoke.sh                      # against http://127.0.0.1:8080
-#   BASE=http://127.0.0.1:9000 ./scripts/smoke.sh
+#   fixture directory -> tblogs-admin build -> tblogs-server serves it
+#                     -> edit + rebuild -> server reloads by itself
+#                     -> tblogs-admin bundle -> check the deployment files
 #
-# The admin lifecycle test creates a post and deletes it again; it is safe to
-# run against a live instance, but it does write.
+# Self-contained: it builds its own fixture in a temporary directory, starts the
+# server on a free port, and tears everything down afterwards. Requires a prior
+# `cargo build` (release is preferred, debug is used as a fallback).
+#
+# Environment:
+#   BIN_DIR   directory holding the two binaries (default target/release or debug)
+#   PORT      port for the throwaway server (default 8099)
+#   KEEP      set to 1 to leave the temporary directory in place
 
 set -uo pipefail
 
-BASE="${BASE:-http://127.0.0.1:8080}"
-COOKIE_JAR="$(mktemp)"
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+if [[ -z "${BIN_DIR:-}" ]]; then
+  if [[ -x "$ROOT/target/release/tblogs-admin" ]]; then
+    BIN_DIR="$ROOT/target/release"
+  elif [[ -x "$ROOT/target/debug/tblogs-admin" ]]; then
+    BIN_DIR="$ROOT/target/debug"
+  else
+    echo "no binaries found; run 'cargo build --release' first" >&2
+    exit 2
+  fi
+fi
+
+ADMIN="$BIN_DIR/tblogs-admin"
+SERVER="$BIN_DIR/tblogs-server"
+PORT="${PORT:-8099}"
+BASE="http://127.0.0.1:$PORT"
+
+for binary in "$ADMIN" "$SERVER"; do
+  if [[ ! -x "$binary" ]]; then
+    echo "missing $binary; run 'cargo build --release' first" >&2
+    exit 2
+  fi
+done
+
+WORK="$(mktemp -d)"
+CONTENT="$WORK/content"
+DIST="$WORK/dist"
+SERVER_PID=""
 PASS=0
 FAIL=0
 
-cleanup() { rm -f "$COOKIE_JAR"; }
+cleanup() {
+  if [[ -n "$SERVER_PID" ]]; then
+    kill "$SERVER_PID" 2>/dev/null
+    wait "$SERVER_PID" 2>/dev/null
+  fi
+  if [[ "${KEEP:-0}" == "1" ]]; then
+    echo "kept: $WORK"
+  else
+    rm -rf "$WORK"
+  fi
+}
 trap cleanup EXIT
 
-ok()   { printf '  \033[32mok\033[0m   %s\n' "$1"; PASS=$((PASS + 1)); }
-bad()  { printf '  \033[31mFAIL\033[0m %s\n' "$1"; FAIL=$((FAIL + 1)); }
+ok()  { printf '  \033[32mok\033[0m   %s\n' "$1"; PASS=$((PASS + 1)); }
+bad() { printf '  \033[31mFAIL\033[0m %s\n' "$1"; FAIL=$((FAIL + 1)); }
 
-# check <description> <expected> <actual>
 check() {
   if [[ "$2" == "$3" ]]; then ok "$1"; else bad "$1 (expected '$2', got '$3')"; fi
 }
 
-# check_contains <description> <needle> <haystack>
 check_contains() {
   if [[ "$3" == *"$2"* ]]; then ok "$1"; else bad "$1 (missing '$2')"; fi
 }
 
-# check_missing <description> <needle> <haystack>
 check_missing() {
   if [[ "$3" != *"$2"* ]]; then ok "$1"; else bad "$1 (unexpectedly found '$2')"; fi
 }
@@ -44,193 +82,285 @@ check_missing() {
 status() { curl -s -o /dev/null -w '%{http_code}' "$@"; }
 body()   { curl -s "$@"; }
 
-# Extract deduplicated hrefs matching a pattern from a page.
-extract_hrefs() { grep -oE "href=\"$1\"" | sed -E 's/href="([^"]+)"/\1/' | sort -u; }
+echo "tblogs end-to-end test"
+echo "  binaries: $BIN_DIR"
+echo "  workdir:  $WORK"
+echo
 
-if ! command -v python3 >/dev/null 2>&1; then
-  echo "python3 is required to validate the feed XML" >&2
-  exit 2
+# ---------------------------------------------------------------- fixture
+mkdir -p "$CONTENT/assets" "$CONTENT/notes/nested.assets"
+
+# A genuinely valid 1x1 PNG, so byte-for-byte serving can be checked.
+PNG_B64='iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFAAH/q842iQAAAABJRU5ErkJggg=='
+png() { printf '%s' "$PNG_B64" | base64 -d > "$1"; }
+
+png "$CONTENT/assets/pic.png"
+png "$CONTENT/assets/我的图.png"
+png "$CONTENT/notes/nested.assets/diagram.png"
+
+cat > "$CONTENT/2026-01-05-hello.md" <<'EOF'
+---
+tags: [Typora, 图片]
+summary: 一篇带图片的文章
+---
+
+# 你好，内容目录
+
+相对路径图片：
+
+![本地图片](assets/pic.png)
+
+Typora 调整大小后会生成原始 HTML：
+
+<img src="assets/pic.png" alt="resized" style="zoom:50%;" />
+
+中文文件名：
+
+![中文图](assets/我的图.png)
+
+远程图片应保持原样：
+
+![remote](https://example.com/x.png)
+EOF
+
+cat > "$CONTENT/notes/nested.md" <<'EOF'
+---
+title: 嵌套目录
+tags: [嵌套]
+---
+
+图片在子目录里：
+
+![diagram](nested.assets/diagram.png)
+EOF
+
+cat > "$CONTENT/draft.md" <<'EOF'
+---
+title: 草稿
+draft: true
+---
+
+不应出现在公开页面。
+EOF
+
+# A Markdown file inside the image folder: it becomes a post, but must never be
+# downloadable through /media.
+cat > "$CONTENT/assets/source.md" <<'EOF'
+# 源文件
+
+这个文件不应该能通过 /media 下载。
+EOF
+
+# ---------------------------------------------------------------- build
+echo "build"
+build_output="$("$ADMIN" build \
+  --content-dir "$CONTENT" \
+  --out "$DIST" \
+  --site-url https://blog.test.example \
+  --title 内容目录测试 \
+  --description '本地目录写作' 2>&1)"
+build_status=$?
+
+check "tblogs-admin build exits 0" "0" "$build_status"
+if [[ "$build_status" != "0" ]]; then
+  echo "$build_output" >&2
 fi
 
-echo "tblogs smoke test against $BASE"
-echo
+check "package contains site.db" "yes" "$([[ -f "$DIST/site.db" ]] && echo yes || echo no)"
+check "package contains media/" "yes" "$([[ -d "$DIST/media" ]] && echo yes || echo no)"
+check "Markdown sources are not mirrored" "no" \
+  "$([[ -f "$DIST/media/assets/source.md" ]] && echo yes || echo no)"
+check "assets are mirrored with their paths" "yes" \
+  "$([[ -f "$DIST/media/notes/nested.assets/diagram.png" ]] && echo yes || echo no)"
+check "no staging directory is left behind" "no" \
+  "$([[ -d "$DIST/.staging" ]] && echo yes || echo no)"
 
-# ---------------------------------------------------------------- reachability
-echo "reachability"
-hc=$(status "$BASE/healthz")
-check "GET /healthz -> 200" "200" "$hc"
-check_contains "GET /healthz body -> ok" "ok" "$(body "$BASE/healthz")"
+# The published database must open read-only, which is how the server uses it.
+if sqlite3 "file:$DIST/site.db?mode=ro" "SELECT count(*) FROM posts;" >/dev/null 2>&1; then
+  ok "the published database opens read-only"
+else
+  bad "the published database does not open read-only"
+fi
 
-# ---------------------------------------------------------------- public pages
+check "no write-ahead log is left beside the database" "no" \
+  "$([[ -f "$DIST/site.db-wal" ]] && echo yes || echo no)"
+
+# ---------------------------------------------------------------- serve
 echo
-echo "public pages"
+echo "serve"
+"$SERVER" --data-dir "$DIST" --bind "127.0.0.1:$PORT" --reload-interval-secs 1 \
+  >"$WORK/server.log" 2>&1 &
+SERVER_PID=$!
+
+for _ in $(seq 1 40); do
+  [[ "$(status --max-time 2 "$BASE/healthz")" == "200" ]] && break
+  sleep 0.25
+done
+
+if [[ "$(status --max-time 5 "$BASE/healthz")" != "200" ]]; then
+  bad "the server did not come up"
+  echo "--- server log ---" >&2
+  cat "$WORK/server.log" >&2
+else
+  ok "the server is up"
+fi
+
+echo
+echo "routes"
 check "GET / -> 200" "200" "$(status "$BASE/")"
-
-index_html=$(body "$BASE/")
-check_contains "home lists a post" "你好，世界" "$index_html"
-check_contains "home links the stylesheet" "/static/style.css" "$index_html"
-check_contains "home links the feed" "/feed.xml" "$index_html"
-
-check "GET /static/style.css -> 200" "200" "$(status "$BASE/static/style.css")"
-check "GET /static/missing.css -> 404" "404" "$(status "$BASE/static/missing.css")"
-
-echo
-echo "post links round-trip"
-# Every link the index emits must resolve. This is the strongest available
-# check on slug generation: a CJK title yields a CJK slug, which the template
-# percent-encodes and the router has to decode again before matching.
-post_link_count=$(printf '%s' "$index_html" | extract_hrefs '/posts/[^"]+' | wc -l | tr -d ' ')
-if [[ "$post_link_count" -gt 0 ]]; then
-  ok "index emits $post_link_count post link(s)"
-else
-  bad "index emitted no post links"
-fi
-
-renders_code=0
-while IFS= read -r href; do
-  [[ -z "$href" ]] && continue
-  page=$(body "$BASE$href")
-  check "GET $href -> 200" "200" "$(status "$BASE$href")"
-  check_contains "GET $href renders a heading" "<h1>" "$page"
-  [[ "$page" == *"<pre><code"* ]] && renders_code=1
-done < <(printf '%s' "$index_html" | extract_hrefs '/posts/[^"]+')
-
-if [[ "$renders_code" -eq 1 ]]; then
-  ok "a post renders a fenced code block"
-else
-  bad "no post rendered a fenced code block"
-fi
-
-echo
-echo "tags"
+check "GET /posts/hello -> 200" "200" "$(status "$BASE/posts/hello")"
+check "GET /posts/nested -> 200" "200" "$(status "$BASE/posts/nested")"
 check "GET /tags -> 200" "200" "$(status "$BASE/tags")"
-tags_html=$(body "$BASE/tags")
-check_contains "tag cloud lists Rust" "Rust" "$tags_html"
-check "GET /tags/rust -> 200" "200" "$(status "$BASE/tags/rust")"
 check "GET /tags/nope -> 404" "404" "$(status "$BASE/tags/nope")"
-
-# Tag names include CJK, so their links have to round-trip the same way.
-tag_link_count=$(printf '%s' "$index_html" | extract_hrefs '/tags/[^"]+' | wc -l | tr -d ' ')
-if [[ "$tag_link_count" -gt 0 ]]; then
-  ok "index emits $tag_link_count tag link(s)"
-else
-  bad "index emitted no tag links"
-fi
-
-while IFS= read -r href; do
-  [[ -z "$href" ]] && continue
-  check "GET $href -> 200" "200" "$(status "$BASE$href")"
-done < <(printf '%s' "$index_html" | extract_hrefs '/tags/[^"]+')
-
-echo
-echo "feed"
 check "GET /feed.xml -> 200" "200" "$(status "$BASE/feed.xml")"
-feed=$(body "$BASE/feed.xml")
-check_contains "feed declares rss 2.0" '<rss version="2.0"' "$feed"
-check_contains "feed has items" "<item>" "$feed"
-# RSS readers require absolute URLs; they resolve against the feed's own
-# location, so a relative link silently breaks every subscriber.
-check_contains "feed items use absolute links" "<link>http" "$feed"
-check_contains "feed carries pubDate" "<pubDate>" "$feed"
-check_contains "feed carries a self link" 'rel="self"' "$feed"
-if command -v python3 >/dev/null 2>&1; then
-  if printf '%s' "$feed" | python3 -c 'import sys,xml.dom.minidom as m; m.parseString(sys.stdin.read())' 2>/dev/null; then
-    ok "feed is well-formed XML"
-  else
-    bad "feed is well-formed XML"
+check "GET /healthz -> 200" "200" "$(status "$BASE/healthz")"
+check "GET /static/style.css -> 200" "200" "$(status "$BASE/static/style.css")"
+check "GET /posts/missing -> 404" "404" "$(status "$BASE/posts/missing")"
+
+echo
+echo "the server is read-only"
+check "GET /admin -> 404" "404" "$(status "$BASE/admin")"
+check "GET /admin/login -> 404" "404" "$(status "$BASE/admin/login")"
+check "POST /admin/new -> 404" "404" \
+  "$(status -X POST "$BASE/admin/new" --data-urlencode 'title=x')"
+check_missing "no admin link in the navigation" 'href="/admin"' "$(body "$BASE/")"
+
+echo
+echo "settings travel with the package"
+check_contains "the title comes from the package" "内容目录测试" "$(body "$BASE/")"
+feed="$(body "$BASE/feed.xml")"
+check_contains "RSS links use the packaged site URL" "<link>https://blog.test.example" "$feed"
+check_contains "the feed carries items" "<item>" "$feed"
+
+echo
+echo "content"
+home="$(body "$BASE/")"
+check_contains "a file's # heading became the title" "你好，内容目录" "$home"
+check_contains "tags from front matter were applied" "图片" "$home"
+check "a draft is not reachable" "404" "$(status "$BASE/posts/draft")"
+check_missing "a draft is not in the index" "不应出现在公开页面" "$home"
+
+echo
+echo "assets"
+check "PNG is served" "200" "$(status "$BASE/media/assets/pic.png")"
+check "PNG keeps its content type" "image/png" \
+  "$(curl -s -o /dev/null -w '%{content_type}' "$BASE/media/assets/pic.png")"
+
+curl -s "$BASE/media/assets/pic.png" -o "$WORK/served.png"
+if cmp -s "$WORK/served.png" "$CONTENT/assets/pic.png"; then
+  ok "served bytes match the source file"
+else
+  bad "served bytes differ from the source file"
+fi
+
+check "a CJK file name is served" "200" \
+  "$(status "$BASE/media/assets/%E6%88%91%E7%9A%84%E5%9B%BE.png")"
+check "a nested asset is served" "200" "$(status "$BASE/media/notes/nested.assets/diagram.png")"
+
+etag="$(curl -s -D- -o /dev/null "$BASE/media/assets/pic.png" | tr -d '\r' \
+  | sed -n 's/^[Ee][Tt][Aa][Gg]: //p')"
+if [[ -n "$etag" ]]; then
+  check "ETag revalidation returns 304" "304" \
+    "$(status -H "If-None-Match: $etag" "$BASE/media/assets/pic.png")"
+else
+  bad "no ETag was returned"
+fi
+
+echo
+echo "the media tree is not browsable"
+check "a Markdown source is not downloadable" "404" "$(status "$BASE/media/assets/source.md")"
+check "path traversal upward is refused" "404" \
+  "$(status --path-as-is "$BASE/media/../site.db")"
+check "path traversal out of the root is refused" "404" \
+  "$(status --path-as-is "$BASE/media/assets/../../etc/hosts")"
+check "a dotfile is refused" "404" "$(status "$BASE/media/.hidden")"
+
+echo
+echo "asset URL rewriting"
+article="$(body "$BASE/posts/hello")"
+check_contains "a relative image was repointed at /media" 'src="/media/assets/pic.png"' "$article"
+check_contains "an image in raw HTML was repointed too" 'src="/media/assets/pic.png"' "$article"
+check_contains "a CJK image name was percent-encoded" \
+  'src="/media/assets/%E6%88%91%E7%9A%84%E5%9B%BE.png"' "$article"
+check_contains "a remote image was left alone" 'src="https://example.com/x.png"' "$article"
+check_contains "the rest of a rewritten tag survived" 'zoom:50%' "$article"
+check_contains "a nested document resolves against its own directory" \
+  'src="/media/notes/nested.assets/diagram.png"' "$(body "$BASE/posts/nested")"
+
+# ---------------------------------------------------------------- reload
+echo
+echo "publishing again reloads without a restart"
+cat >> "$CONTENT/2026-01-05-hello.md" <<'EOF'
+
+## 热更新
+
+这一行是重新发布之后加的。
+EOF
+
+"$ADMIN" build --content-dir "$CONTENT" --out "$DIST" \
+  --site-url https://blog.test.example --title 内容目录测试 >/dev/null 2>&1
+
+reloaded=0
+for _ in $(seq 1 40); do
+  if body "$BASE/posts/hello" | grep -q '这一行是重新发布之后加的'; then
+    reloaded=1
+    break
   fi
-fi
+  sleep 0.5
+done
 
-echo
-echo "not found"
-check "GET /posts/does-not-exist -> 404" "404" "$(status "$BASE/posts/does-not-exist")"
-check "GET /no-such-route -> 404" "404" "$(status "$BASE/no-such-route")"
-
-# ---------------------------------------------------------------- admin
-echo
-echo "admin authentication"
-# Admin requests carry the session cookie. Against an ungated instance the jar
-# stays empty and the flag is a no-op, so one script covers both modes; set
-# ADMIN_TOKEN to exercise the gate itself.
-admin_status() { curl -s -o /dev/null -w '%{http_code}' -b "$COOKIE_JAR" "$@"; }
-admin_body()   { curl -s -b "$COOKIE_JAR" "$@"; }
-
-if [[ -n "${ADMIN_TOKEN:-}" ]]; then
-  check "GET /admin without a session -> 303" "303" "$(status "$BASE/admin")"
-  check "POST /admin/login with a wrong token -> 401" "401" \
-    "$(status -X POST "$BASE/admin/login" --data-urlencode "token=definitely-not-the-token")"
-  check "POST /admin/login with the right token -> 303" "303" \
-    "$(status -c "$COOKIE_JAR" -X POST "$BASE/admin/login" --data-urlencode "token=$ADMIN_TOKEN")"
-  check "GET /admin with the session cookie -> 200" "200" "$(admin_status "$BASE/admin")"
-  check "POST /admin/new without a session -> 303" "303" \
-    "$(status -X POST "$BASE/admin/new" --data-urlencode "title=Nope" --data-urlencode "status=draft")"
-
-  # Logout is verified in its own jar so it cannot disturb the session the
-  # lifecycle checks below depend on.
-  logout_jar=$(mktemp)
-  curl -s -c "$logout_jar" -o /dev/null -X POST "$BASE/admin/login" \
-    --data-urlencode "token=$ADMIN_TOKEN"
-  check "POST /admin/logout -> 303" "303" \
-    "$(curl -s -o /dev/null -w '%{http_code}' -b "$logout_jar" -c "$logout_jar" -X POST "$BASE/admin/logout")"
-  check "session is cleared after logout -> 303" "303" \
-    "$(curl -s -o /dev/null -w '%{http_code}' -b "$logout_jar" "$BASE/admin")"
-  rm -f "$logout_jar"
+if [[ "$reloaded" -eq 1 ]]; then
+  ok "the new package was picked up automatically"
 else
-  echo "  (skipped: set ADMIN_TOKEN to exercise the auth gate)"
+  bad "the server did not reload the new package"
 fi
 
+check_contains "the reload is visible in the log" "reloaded the content package" \
+  "$(cat "$WORK/server.log")"
+
+# ---------------------------------------------------------------- bundle
 echo
-echo "admin lifecycle"
-check "GET /admin -> 200" "200" "$(admin_status "$BASE/admin")"
+echo "bundle"
+# The data directory is deliberately not passed: it must be derived from the
+# install root, which the next checks confirm.
+"$ADMIN" bundle \
+  --out "$DIST" \
+  --domain blog.test.example \
+  --install-dir /srv/tblogs >"$WORK/bundle.log" 2>&1
+check "tblogs-admin bundle exits 0" "0" "$?"
 
-created=$(admin_status -X POST "$BASE/admin/new" \
-  --data-urlencode "title=Smoke Test Post" \
-  --data-urlencode "slug=" \
-  --data-urlencode "summary=" \
-  --data-urlencode "body_md=# Hello
+for file in tblogs-server install.sh tblogs.service nginx.conf Caddyfile \
+            cloudflared-config.yml ddns-update.sh check-exposure.sh README.md; do
+  check "bundle contains $file" "yes" \
+    "$([[ -f "$DIST/server/$file" ]] && echo yes || echo no)"
+done
 
-Smoke **body** text." \
-  --data-urlencode "tags=smoke, test" \
-  --data-urlencode "status=published")
-check "POST /admin/new -> 303" "303" "$created"
+check "the bundled binary is executable" "yes" \
+  "$([[ -x "$DIST/server/tblogs-server" ]] && echo yes || echo no)"
+check "install.sh is executable" "yes" \
+  "$([[ -x "$DIST/server/install.sh" ]] && echo yes || echo no)"
 
-admin_html=$(admin_body "$BASE/admin")
-check_contains "new post appears in admin list" "Smoke Test Post" "$admin_html"
-check_contains "tags were attached" "smoke" "$admin_html"
+check_contains "the data directory is derived from the install root" \
+  "TBLOGS_DATA_DIR=/srv/tblogs/data" "$(cat "$DIST/server/tblogs.service")"
+check_contains "the unit keeps the filesystem read-only" "ProtectSystem=strict" \
+  "$(cat "$DIST/server/tblogs.service")"
+check_missing "no workspace placeholder survives in the unit" "/opt/tblogs" \
+  "$(cat "$DIST/server/tblogs.service")"
+check_contains "nginx is rendered for the domain" "blog.test.example" \
+  "$(cat "$DIST/server/nginx.conf")"
+check_contains "install.sh uses the requested root" 'ROOT="/srv/tblogs"' \
+  "$(cat "$DIST/server/install.sh")"
+check_missing "no media marker survives in install.sh" "MEDIA_DIR_MARKER" \
+  "$(cat "$DIST/server/install.sh")"
 
-# The list is ordered by updated_at DESC, so the new post is the first row.
-post_id=$(printf '%s' "$admin_html" | grep -oE '/admin/posts/[0-9]+/edit' | head -1 | grep -oE '[0-9]+' || true)
+for script in install.sh ddns-update.sh check-exposure.sh; do
+  if bash -n "$DIST/server/$script" 2>/dev/null; then
+    ok "$script is valid shell"
+  else
+    bad "$script has a syntax error"
+  fi
+done
 
-if [[ -z "$post_id" ]]; then
-  bad "could not determine the new post id"
-else
-  ok "resolved new post id ($post_id)"
-
-  check "published post is publicly reachable" "200" "$(status "$BASE/posts/smoke-test-post")"
-  check_contains "rendered markdown from admin form" "<h1>Hello</h1>" "$(body "$BASE/posts/smoke-test-post")"
-  check "GET edit form -> 200" "200" "$(admin_status "$BASE/admin/posts/$post_id/edit")"
-
-  check "POST toggle -> 303" "303" "$(admin_status -X POST "$BASE/admin/posts/$post_id/publish")"
-  check "unpublished post is hidden" "404" "$(status "$BASE/posts/smoke-test-post")"
-  check "draft still visible in admin" "200" "$(admin_status "$BASE/admin")"
-
-  check "re-publish -> 303" "303" "$(admin_status -X POST "$BASE/admin/posts/$post_id/publish")"
-  check "re-published post is public again" "200" "$(status "$BASE/posts/smoke-test-post")"
-
-  check "POST delete -> 303" "303" "$(admin_status -X POST "$BASE/admin/posts/$post_id/delete")"
-  check "deleted post is gone" "404" "$(status "$BASE/posts/smoke-test-post")"
-  check_missing "deleted post left the admin list" "Smoke Test Post" "$(admin_body "$BASE/admin")"
-  check "empty tag was cleaned up" "404" "$(status "$BASE/tags/smoke")"
-fi
-
-echo
-echo "validation"
-check "empty title is rejected" "200" "$(admin_status -X POST "$BASE/admin/new" \
-  --data-urlencode "title=" --data-urlencode "body_md=x" --data-urlencode "status=draft")"
-check_contains "empty title shows a message" "标题不能为空" "$(admin_body -X POST "$BASE/admin/new" \
-  --data-urlencode "title=" --data-urlencode "body_md=x" --data-urlencode "status=draft")"
-
-# ---------------------------------------------------------------- summary
 echo
 if [[ "$FAIL" -eq 0 ]]; then
   printf '\033[32m%d checks passed\033[0m\n' "$PASS"

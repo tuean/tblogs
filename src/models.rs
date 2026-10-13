@@ -1,6 +1,5 @@
 //! Data types shared between the database layer and the templates.
 
-use serde::Deserialize;
 use sqlx::{Row, sqlite::SqliteRow};
 
 /// A post exactly as stored in the `posts` table.
@@ -19,12 +18,11 @@ pub struct Post {
     pub created_at: String,
     pub updated_at: String,
     pub published_at: Option<String>,
-    /// Path relative to the content directory when this post came from a
-    /// Markdown file on disk. `None` for posts created in the web admin.
+    /// Path of the source Markdown file, relative to the content root.
     ///
-    /// The file's modification time is used for change detection, but only by
-    /// the sync job's own query, so it is not carried on this struct.
-    pub source_path: Option<String>,
+    /// Always present: every post in a package comes from a file. The server
+    /// uses it to resolve that post's relative image references.
+    pub source_path: String,
 }
 
 impl Post {
@@ -36,14 +34,6 @@ impl Post {
             .as_deref()
             .unwrap_or(self.updated_at.as_str());
         format_local_date(raw)
-    }
-
-    /// Whether the post is owned by a file on disk.
-    ///
-    /// A file-backed post must not be edited or deleted through the web admin:
-    /// the next sync would either overwrite the change or resurrect the post.
-    pub fn is_file_backed(&self) -> bool {
-        self.source_path.is_some()
     }
 }
 
@@ -126,6 +116,69 @@ impl<'r> sqlx::FromRow<'r, SqliteRow> for Tag {
     }
 }
 
+/// Site-wide values baked into the content package at build time.
+///
+/// Keeping them in the database means a published server needs no
+/// configuration to render correctly: titles, meta tags and absolute RSS links
+/// all travel with the content.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Settings {
+    pub site_title: String,
+    pub site_description: String,
+    /// Absolute public base URL, without a trailing slash.
+    pub site_url: String,
+    /// When the package was produced, surfaced as a build stamp.
+    pub built_at: String,
+}
+
+impl Default for Settings {
+    fn default() -> Self {
+        Self {
+            site_title: "我的博客".to_string(),
+            site_description: String::new(),
+            site_url: "http://localhost:8080".to_string(),
+            built_at: String::new(),
+        }
+    }
+}
+
+impl Settings {
+    /// Apply overrides on top of the stored values.
+    pub fn with_overrides(
+        mut self,
+        title: Option<String>,
+        description: Option<String>,
+        url: Option<String>,
+    ) -> Self {
+        if let Some(title) = title {
+            self.site_title = title;
+        }
+        if let Some(description) = description {
+            self.site_description = description;
+        }
+        if let Some(url) = url {
+            self.site_url = url;
+        }
+        self
+    }
+
+    /// `YYYY-MM-DD` build date, empty when the package predates the field.
+    pub fn build_date(&self) -> String {
+        if self.built_at.is_empty() {
+            return String::new();
+        }
+        format_local_date(&self.built_at)
+    }
+}
+
+/// A tag together with how many published posts carry it.
+#[derive(Debug, Clone)]
+pub struct TagCount {
+    pub name: String,
+    pub slug: String,
+    pub count: i64,
+}
+
 /// A post prepared for rendering.
 #[derive(Debug, Clone)]
 pub struct PostView {
@@ -138,128 +191,56 @@ pub struct PostView {
     pub tags: Vec<Tag>,
 }
 
-/// A post prepared for the admin edit form, which edits raw Markdown.
-#[derive(Debug, Clone)]
-pub struct PostFormView {
-    pub slug: String,
-    pub title: String,
-    pub summary: String,
-    pub body_md: String,
-    pub published: bool,
-    /// Comma-separated tag names, as the form field expects.
-    pub tags: String,
-}
-
-impl PostFormView {
-    /// A blank form for creating a post.
-    pub fn new_post() -> Self {
-        Self {
-            slug: String::new(),
-            title: String::new(),
-            summary: String::new(),
-            body_md: String::new(),
-            published: false,
-            tags: String::new(),
-        }
-    }
-}
-
-/// A tag together with how many published posts carry it.
-#[derive(Debug, Clone)]
-pub struct TagCount {
-    pub name: String,
-    pub slug: String,
-    pub count: i64,
-}
-
-/// The submitted contents of the post form.
+/// Clean up tag names coming from front matter.
 ///
-/// `status` arrives from a `<select>` rather than a checkbox so that a
-/// deliberately unchecked box cannot be confused with a missing field.
-#[derive(Debug, Deserialize)]
-pub struct PostForm {
-    #[serde(default)]
-    pub title: String,
-    #[serde(default)]
-    pub slug: String,
-    #[serde(default)]
-    pub summary: String,
-    #[serde(default)]
-    pub body_md: String,
-    #[serde(default)]
-    pub tags: String,
-    #[serde(default = "default_status")]
-    pub status: String,
-}
+/// Trims, drops empties, deduplicates case-insensitively while keeping the
+/// first spelling seen, and caps the length so a stray paragraph cannot become
+/// a tag. Front matter is hand-written, so it needs the same tolerance the web
+/// form used to apply.
+pub fn normalise_tags(names: &[String]) -> Vec<String> {
+    let mut seen = std::collections::HashSet::new();
+    let mut tags = Vec::new();
 
-fn default_status() -> String {
-    "draft".to_string()
-}
-
-impl PostForm {
-    pub fn is_publish(&self) -> bool {
-        self.status == "published"
-    }
-
-    /// Split the comma/whitespace separated tag field into clean names.
-    ///
-    /// Accepts both `,` and `，` (the full-width comma common on Chinese
-    /// keyboards) plus whitespace, and removes duplicates case-insensitively.
-    pub fn tag_names(&self) -> Vec<String> {
-        let mut seen = std::collections::HashSet::new();
-        let mut names = Vec::new();
-
-        for raw in self
-            .tags
-            .split([',', '，', '\n', '\t'])
-            .flat_map(|part| part.split_whitespace())
-        {
-            let name = raw.trim().trim_start_matches('#').trim();
-            if name.is_empty() {
-                continue;
-            }
-            if seen.insert(name.to_lowercase()) {
-                names.push(name.to_string());
-            }
+    for name in names {
+        let name = name.trim().trim_start_matches('#').trim();
+        if name.is_empty() {
+            continue;
         }
 
-        names
+        let name: String = name.chars().take(50).collect();
+        if seen.insert(name.to_lowercase()) {
+            tags.push(name);
+        }
     }
+
+    tags
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn form_with_tags(tags: &str) -> PostForm {
-        PostForm {
-            title: "t".into(),
-            slug: String::new(),
-            summary: String::new(),
-            body_md: String::new(),
-            tags: tags.into(),
-            status: "draft".into(),
-        }
+    fn tags(names: &[&str]) -> Vec<String> {
+        let owned: Vec<String> = names.iter().map(|name| (*name).to_string()).collect();
+        normalise_tags(&owned)
     }
 
     #[test]
-    fn tag_names_split_on_both_comma_styles() {
-        let form = form_with_tags("rust, axum，sqlite  #gpui");
-        assert_eq!(form.tag_names(), vec!["rust", "axum", "sqlite", "gpui"]);
+    fn tags_are_trimmed_and_deduplicated_case_insensitively() {
+        assert_eq!(tags(&["Rust", " rust ", "RUST"]), vec!["Rust"]);
+        assert_eq!(tags(&["a", "", "  "]), vec!["a"]);
     }
 
     #[test]
-    fn tag_names_drop_duplicates_case_insensitively() {
-        let form = form_with_tags("Rust, rust, RUST");
-        assert_eq!(form.tag_names(), vec!["Rust"]);
+    fn tags_lose_a_leading_hash() {
+        // Front matter sometimes carries `tags: [#rust]`.
+        assert_eq!(tags(&["#rust", "#  axum"]), vec!["rust", "axum"]);
     }
 
     #[test]
-    fn status_select_maps_to_published_flag() {
-        let mut form = form_with_tags("");
-        assert!(!form.is_publish());
-        form.status = "published".into();
-        assert!(form.is_publish());
+    fn tag_length_is_capped() {
+        let long = "x".repeat(200);
+        assert_eq!(tags(&[&long])[0].chars().count(), 50);
     }
 
     fn post_with(published_at: Option<&str>, updated_at: &str) -> Post {
@@ -273,7 +254,7 @@ mod tests {
             created_at: updated_at.to_string(),
             updated_at: updated_at.to_string(),
             published_at: published_at.map(str::to_string),
-            source_path: None,
+            source_path: "post.md".into(),
         }
     }
 
@@ -295,7 +276,6 @@ mod tests {
     #[test]
     fn display_date_prefers_publication_and_falls_back_for_junk() {
         let post = post_with(Some("2026-03-04T05:06:07Z"), "2026-01-01T00:00:00Z");
-        // published_at wins over updated_at; only the zone can change the day.
         assert!(
             post.display_date().starts_with("2026-03-0"),
             "got {}",
@@ -306,5 +286,22 @@ mod tests {
         // panicking.
         let broken = post_with(Some("not-a-timestamp"), "also-junk");
         assert_eq!(broken.display_date(), "not-a-time");
+    }
+
+    #[test]
+    fn settings_overrides_only_replace_what_is_given() {
+        let base = Settings {
+            site_title: "before".into(),
+            site_description: "desc".into(),
+            site_url: "https://a.example".into(),
+            built_at: "2026-01-01T00:00:00Z".into(),
+        };
+
+        let updated = base
+            .clone()
+            .with_overrides(Some("after".into()), None, None);
+        assert_eq!(updated.site_title, "after");
+        assert_eq!(updated.site_description, "desc");
+        assert_eq!(updated.site_url, "https://a.example");
     }
 }

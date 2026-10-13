@@ -99,21 +99,21 @@ DDNS 只做一件事：**定时把域名解析改写成当前 IP**。它不会�
 rustup target add x86_64-unknown-linux-gnu
 cargo build --release --target x86_64-unknown-linux-gnu
 
-# 只需上传两样：二进制 + 迁移目录。
-# 模板在编译期编入二进制，CSS 用 include_str! 内嵌，都不需要随行。
-rsync -av target/x86_64-unknown-linux-gnu/release/tblogs \
-          migrations \
-          user@your-vps:/opt/tblogs/
+# 构建内容包并生成整套部署文件
+tblogs-admin build   --content-dir ~/blog --out dist \
+    --site-url https://blog.example.com --title 我的博客
+tblogs-admin bundle  --out dist --domain blog.example.com --install-dir /opt/tblogs
 
-# 服务器上装服务
-sudo cp deploy/tblogs.service /etc/systemd/system/
-sudo install -m 600 /dev/null /etc/tblogs.env
-echo 'TBLOGS_ADMIN_TOKEN='"$(openssl rand -hex 16)" | sudo tee /etc/tblogs.env
-sudo systemctl enable --now tblogs
+# 一条命令推上去
+tblogs-admin publish --out dist --to user@your-vps:/opt/tblogs
 
-# 反向代理 + HTTPS
-sudo cp deploy/nginx.conf /etc/nginx/sites-available/tblogs
-sudo certbot --nginx -d blog.example.com
+# 服务器上装一次
+ssh user@your-vps 'sudo bash /opt/tblogs/server/install.sh'
+
+# 反向代理 + HTTPS，二选一
+ssh user@your-vps 'sudo cp /opt/tblogs/server/Caddyfile /etc/caddy/Caddyfile'
+ssh user@your-vps 'sudo cp /opt/tblogs/server/nginx.conf /etc/nginx/sites-available/tblogs'
+ssh user@your-vps 'sudo certbot --nginx -d blog.example.com'
 ```
 
 国内云主机用 80/443 对外提供 Web 服务需要 ICP 备案。
@@ -218,10 +218,10 @@ custom_domains = blog.example.com
 5. 启动服务时绑定到所有地址：
 
    ```bash
-   TBLOGS_BIND=0.0.0.0:8080 \
-   TBLOGS_SITE_URL=https://blog.example.com \
-   TBLOGS_ADMIN_TOKEN=$(openssl rand -hex 16) \
-   ./tblogs
+   tblogs-server --data-dir /opt/tblogs/data --bind 0.0.0.0:8080
+   ```
+
+   站点标题与公开 URL 由内容包自带；要覆盖就用 `TBLOGS_SITE_URL` 等环境变量。
    ```
 
 ---
@@ -278,19 +278,18 @@ curl -s -o /dev/null -w '%{http_code}\n' \
 
 无论走哪条路线，暴露到公网之前请逐项确认：
 
-- [ ] **设置 `TBLOGS_ADMIN_TOKEN`**。未设置时 `/admin` 完全开放，任何人都能
-      发文章、删文章。
-- [ ] **`TBLOGS_SITE_URL` 用 `https://`**。程序据此决定会话 Cookie 是否加
-      `Secure` 标志。
-- [ ] **启用 HTTPS**（`deploy/nginx.conf` 或 `deploy/Caddyfile`）。明文传输
-      管理员令牌等于公开口令。用 Cloudflare Tunnel / 代理时 HTTPS 由前端提供。
-- [ ] **给 `/admin/login` 限速**。当前没有防暴力破解，nginx 配置里已给出
-      `limit_req` 示例。
-- [ ] **考虑把 `/admin` 限制到内网/VPN**，而不是对整个公网开放。
-- [ ] **备份 `data/tblogs.db`**。SQLite 开了 WAL，热备份请连同 `-wal`、`-shm`
-      一起复制，或先停服务再复制。
-- [ ] **国内云主机别忘了 ICP 备案**。
+服务端**没有写入口**：数据库以只读方式打开，进程里没有写语句，`/admin` 一律
+404，也没有任何需要登录的接口——所以口令、登录限速、后台白名单这些都不适用。
+仍然要确认：
 
+- [ ] **构建时 `--site-url` 用 `https://`**。RSS 里的链接是绝对的，写错读者打不开。
+- [ ] **启用 HTTPS**（`server/nginx.conf` 或 `server/Caddyfile`）。Caddy 自动申请
+      证书；用 nginx 再跑一次 `certbot`。
+- [ ] **确认服务只监听回环**。`TBLOGS_BIND` 默认 `127.0.0.1:8080`，由反向代理对外；
+      除非确实要绕过代理，否则不要改成 `0.0.0.0`。
+- [ ] **备份你的 Markdown 目录和 `dist/`**。服务器上的 `data/` 只是副本，丢了重新
+      `tblogs-admin publish` 一次即可。
+- [ ] **国内云主机别忘了 ICP 备案**。
 ---
 
 ## 八、本目录文件
@@ -301,6 +300,12 @@ curl -s -o /dev/null -w '%{http_code}\n' \
 | `ddns-update.sh` | Cloudflare DDNS 更新（支持 A / AAAA，幂等） |
 | `ddns.service` / `ddns.timer` | 用 systemd 定时跑 DDNS |
 | `tblogs.service` | systemd 服务单元 |
-| `nginx.conf` | nginx 反向代理 + HTTPS + 限速 |
+| `nginx.conf` | nginx 反向代理 + HTTPS + 登录限速示例 |
 | `Caddyfile` | Caddy 版（自动申请证书，配置更短） |
 | `cloudflared-config.yml` | Cloudflare Tunnel 配置 |
+
+这些文件同时是 `tblogs-admin bundle` 的**模板**：它们被编译进 `tblogs-admin`，
+生成部署目录时会按你的域名和路径渲染好（把 `blog.example.com` 换成你的域名、
+`/opt/tblogs` 换成你的安装目录）。所以在这里改了模板，`bundle` 的产物会跟着变；
+`src/bundle.rs` 里有断言，万一模板结构改动导致替换失效，`bundle` 会直接报错而不是
+默默生成一份配置错误的单元文件。

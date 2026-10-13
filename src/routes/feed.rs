@@ -21,12 +21,14 @@ use crate::{
 const FEED_LIMIT: i64 = 20;
 
 pub async fn rss(State(state): State<AppState>) -> Result<Response, AppError> {
-    let posts = db::list_published(&state.pool, FEED_LIMIT, 0).await?;
+    let snapshot = state.current().await;
+
+    let posts = db::list_published(&snapshot.pool, FEED_LIMIT, 0).await?;
 
     let items = posts
         .into_iter()
         .map(|post| {
-            let link = format!("{}{}", state.cfg.site_url, util::post_path(&post.slug));
+            let link = format!("{}{}", snapshot.site_url(), util::post_path(&post.slug));
 
             // Prefer the author's summary; fall back to the body when a post
             // was written without one.
@@ -46,9 +48,9 @@ pub async fn rss(State(state): State<AppState>) -> Result<Response, AppError> {
         .collect();
 
     let xml = FeedTemplate {
-        site_title: state.cfg.site_title.clone(),
-        site_description: state.cfg.site_description.clone(),
-        site_url: state.cfg.site_url.clone(),
+        site_title: snapshot.title(),
+        site_description: snapshot.description(),
+        site_url: snapshot.site_url().to_string(),
         last_build: chrono::Utc::now().to_rfc2822(),
         items,
     }

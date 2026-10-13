@@ -17,7 +17,11 @@ use std::{
 use anyhow::{Context, Result};
 use sqlx::SqlitePool;
 
-use crate::{db, frontmatter, markdown, models::SourcedPost, slug};
+use crate::{
+    db, frontmatter, markdown,
+    models::{SourcedPost, normalise_tags},
+    slug,
+};
 
 /// File extensions treated as articles.
 const MARKDOWN_EXTENSIONS: &[&str] = &["md", "markdown"];
@@ -36,6 +40,13 @@ pub struct SourceFile {
 /// redundant sync, which then finds every file unchanged.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Fingerprint(u64);
+
+impl Fingerprint {
+    /// The raw digest, for callers that only need a comparable scalar.
+    pub fn value(self) -> u64 {
+        self.0
+    }
+}
 
 /// What one sync pass did.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
@@ -211,7 +222,7 @@ pub fn build_post(root: &Path, file: &SourceFile) -> Result<SourcedPost> {
         published: !document.front.draft,
         date_hint: document.front.date.clone().or(name_date),
         updated_at: iso_from_nanos(file.mtime),
-        tags: document.front.tags.clone(),
+        tags: normalise_tags(&document.front.tags),
     })
 }
 
@@ -579,17 +590,6 @@ mod tests {
                 .is_none()
         );
 
-        // A post created in the web admin is not touched by any of this.
-        let form = crate::models::PostForm {
-            title: "Web Only".into(),
-            slug: String::new(),
-            summary: String::new(),
-            body_md: "written in the browser".into(),
-            tags: String::new(),
-            status: "published".into(),
-        };
-        let web_id = db::create_post(&pool, &form).await.unwrap();
-
         // Deleting the file removes its post ...
         std::fs::remove_file(scratch.dir.join("2026-01-01-hello.md")).unwrap();
         let files = scan(&scratch.dir).unwrap();
@@ -602,8 +602,13 @@ mod tests {
                 .is_none()
         );
 
-        // ... but leaves the admin-created one alone.
-        assert!(db::find_by_id(&pool, web_id).await.unwrap().is_some());
+        // The other file is untouched by that removal.
+        assert!(
+            db::find_by_source(&pool, "notes/nested.md")
+                .await
+                .unwrap()
+                .is_some()
+        );
 
         std::fs::remove_dir_all(&scratch.dir).unwrap();
     }
