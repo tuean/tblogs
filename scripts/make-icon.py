@@ -1,14 +1,17 @@
 #!/usr/bin/env python3
-"""Generate the site favicon from a single character.
+"""Generate the site favicon from a single symbol.
 
-The site mark is one Chinese character drawn as an outlined path rather than as
-`<text>`. That matters: an SVG favicon that relies on a font renders differently
-— or not at all — on a machine without that font, and the whole point of the
-icon is that it always looks the same.
+The mark is `#` — the Markdown heading, which is what this blog is written in.
+It was picked by rendering candidates at their true 16px: a hash stays sharp
+there, while `</>`, `{ }`, `&`, `@` and `%` all collapse into a blob.
 
-Run with a Python that has `fonttools` (a venv is enough):
+The symbol is drawn as an outlined path rather than SVG `<text>`. An icon that
+relies on a font renders differently — or not at all — on a machine without it,
+and the whole point of an icon is that it always looks the same.
 
-    python3 -m venv /tmp/iconvenv && /tmp/iconvenv/bin/pip install fonttools
+Run with a Python that has `fonttools` and `pillow` (a venv is enough):
+
+    python3 -m venv /tmp/iconvenv && /tmp/iconvenv/bin/pip install fonttools pillow
     /tmp/iconvenv/bin/python scripts/make-icon.py
 
 Outputs into static/: favicon.svg, favicon.ico, favicon-32.png,
@@ -24,25 +27,25 @@ from fontTools.pens.transformPen import TransformPen
 from fontTools.ttLib import TTFont
 from PIL import Image, ImageDraw, ImageFont
 
-# The mark. 技 reads clearly even at 16px, where more complex characters (博,
-# for instance) turn to mud.
-GLYPH = "技"
+# The mark, and the face it comes from. A monospace bold keeps the strokes even
+# and thick, which is what survives being shrunk to a tab icon.
+GLYPH = "#"
+FONT_CANDIDATES = [
+    ("/System/Library/Fonts/Menlo.ttc", 1),  # Menlo Bold
+    ("/System/Library/Fonts/Supplemental/Courier New Bold.ttf", 0),
+    ("/System/Library/Fonts/Helvetica.ttc", 1),  # Helvetica Bold
+    ("/System/Library/Fonts/Supplemental/Arial Bold.ttf", 0),
+]
 
 # Matches --accent in static/style.css.
 BLUE = "#2f6feb"
 WHITE = "#ffffff"
 
-# 32 is the SVG coordinate space; the glyph is sized to leave a margin inside
+# 32 is the SVG coordinate space; the mark is sized to leave a margin inside
 # the rounded square rather than touching the edges.
 VIEWBOX = 32
-GLYPH_BOX = 19.0
+GLYPH_BOX = 20.0
 CORNER_RADIUS = 7
-
-FONT_CANDIDATES = [
-    ("/System/Library/Fonts/Hiragino Sans GB.ttc", 1),
-    ("/System/Library/Fonts/STHeiti Medium.ttc", 0),
-    ("/System/Library/Fonts/PingFang.ttc", 4),
-]
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 STATIC = ROOT / "static"
@@ -52,11 +55,11 @@ def find_font():
     for path, index in FONT_CANDIDATES:
         if pathlib.Path(path).exists():
             return path, index
-    raise SystemExit("no CJK font found; edit FONT_CANDIDATES")
+    raise SystemExit("no suitable bold font found; edit FONT_CANDIDATES")
 
 
 def glyph_path(font_path, index):
-    """The character as an SVG path, centred in the viewBox."""
+    """The symbol as an SVG path, centred in the viewBox."""
     font = TTFont(font_path, fontNumber=index)
     glyphset = font.getGlyphSet()
     name = font.getBestCmap()[ord(GLYPH)]
@@ -87,7 +90,7 @@ def glyph_path(font_path, index):
 def write_svg(path_data, out):
     svg = (
         f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {VIEWBOX} {VIEWBOX}" '
-        f'role="img" aria-label="{GLYPH}">\n'
+        f'role="img" aria-label="blog">\n'
         f'  <rect width="{VIEWBOX}" height="{VIEWBOX}" rx="{CORNER_RADIUS}" fill="{BLUE}"/>\n'
         f'  <path d="{path_data}" fill="{WHITE}"/>\n'
         f"</svg>\n"
@@ -98,8 +101,8 @@ def write_svg(path_data, out):
 
 def draw_icon(font_path, index, size):
     """One rasterised icon at the given size."""
-    # The rounded square is drawn oversized and downsampled, because Pillow
-    # has no antialiased rounded rectangle.
+    # The rounded square is drawn oversized and downsampled, because Pillow has
+    # no antialiased rounded rectangle.
     supersample = 4
     big = Image.new("RGBA", (size * supersample,) * 2, (0, 0, 0, 0))
     ImageDraw.Draw(big).rounded_rectangle(
@@ -110,8 +113,20 @@ def draw_icon(font_path, index, size):
     image = big.resize((size, size), Image.LANCZOS)
 
     draw = ImageDraw.Draw(image)
-    # Match GLYPH_BOX / VIEWBOX from the SVG so both agree.
-    font = ImageFont.truetype(font_path, int(size * GLYPH_BOX / VIEWBOX), index=index)
+
+    # The SVG fits the glyph's *ink* — its bounding box — to GLYPH_BOX, so the
+    # raster must too. Sizing by point size instead would render the glyph
+    # smaller, because ink is always smaller than the em, and the two formats
+    # would disagree. Measure once, then rescale.
+    trial = 100
+    probe = ImageFont.truetype(font_path, trial, index=index)
+    probe_box = draw.textbbox((0, 0), GLYPH, font=probe)
+    ink = max(probe_box[2] - probe_box[0], probe_box[3] - probe_box[1])
+
+    target = size * GLYPH_BOX / VIEWBOX
+    font = ImageFont.truetype(
+        font_path, max(1, round(trial * target / ink)), index=index
+    )
     box = draw.textbbox((0, 0), GLYPH, font=font)
     width, height = box[2] - box[0], box[3] - box[1]
     draw.text(
@@ -126,25 +141,25 @@ def draw_icon(font_path, index, size):
 
 def main():
     font_path, index = find_font()
-    print(f"font: {font_path} (face {index})")
-    print(f"glyph: {GLYPH}")
+    print(f"font:  {font_path} (face {index})")
+    print(f"glyph: {GLYPH!r}")
 
     STATIC.mkdir(exist_ok=True)
 
     path_data = glyph_path(font_path, index)
     size = write_svg(path_data, STATIC / "favicon.svg")
-    print(f"  favicon.svg            {size} B, path {len(path_data)} chars")
+    print(f"  favicon.svg               {size} B, path {len(path_data)} chars")
 
     for name, px in [("favicon-32.png", 32), ("apple-touch-icon.png", 180)]:
         draw_icon(font_path, index, px).save(STATIC / name)
-        print(f"  {name:<22} {px}x{px}  {(STATIC / name).stat().st_size} B")
+        print(f"  {name:<25} {px}x{px}  {(STATIC / name).stat().st_size} B")
 
     # An .ico carrying 16/32/48 covers browsers that still ask for one. It has
     # to be built from a master larger than every size in it: Pillow downscales
     # but will not invent a 48px frame from a 32px source.
     ico_sizes = [(16, 16), (32, 32), (48, 48)]
     draw_icon(font_path, index, 256).save(STATIC / "favicon.ico", sizes=ico_sizes)
-    print(f"  favicon.ico            {ico_sizes}  {(STATIC / 'favicon.ico').stat().st_size} B")
+    print(f"  favicon.ico               {ico_sizes}  {(STATIC / 'favicon.ico').stat().st_size} B")
 
     return 0
 

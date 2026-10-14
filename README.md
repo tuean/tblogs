@@ -244,29 +244,42 @@ draft: false
 
 ## 站点图标
 
-图标是单个汉字**「技」**（取自「技术笔记」）转成的轮廓路径，底色用站点强调色
-`--accent`。选它是因为在 16px 下仍然可认 —— 笔画更多的字（比如「博」）在这个
-尺寸会糊成一团。
+图标是符号 **`#`** —— Markdown 的标题符号,而这个博客正是 Markdown 驱动的。
+底色用站点强调色 `--accent`。
 
-四种格式一起提供，全部编译进二进制，静态导出时也会写成真实文件：
+选 `#` 的办法是**把候选渲染到真实的 16px 再挑**,而不是看大图猜。结果是:
+
+| 候选 | 16px 下的表现 |
+|---|---|
+| **`#`** | ✅ 笔画粗、结构清楚 |
+| `>` `=` `/` | ✅ 清楚但太普通 |
+| `[ ]` `>_` | ⚠️ 偏细 |
+| `</>` `{ }` | ❌ 三个字符挤成一团 |
+| `&` `@` `$` `%` | ❌ 糊成一块 |
+
+四种格式一起提供,全部编译进二进制,静态导出时也会写成真实文件:
 
 | 文件 | 用途 |
 |---|---|
-| `favicon.svg` | 主图标，矢量，任意尺寸都锐利 |
-| `favicon.ico` | 内嵌 16/32/48，浏览器默认会自己来取 |
+| `favicon.svg` | 主图标,矢量,任意尺寸都锐利（不到 1 KB） |
+| `favicon.ico` | 内嵌 16/32/48,浏览器默认会自己来取 |
 | `favicon-32.png` | 不支持 SVG 图标时的回退 |
-| `apple-touch-icon.png` | iOS 添加到主屏，180px |
+| `apple-touch-icon.png` | iOS 添加到主屏,180px |
 
-换成别的字或配色：
+换成别的符号或配色:
 
 ```bash
 python3 -m venv /tmp/iconvenv && /tmp/iconvenv/bin/pip install fonttools pillow
-# 编辑 scripts/make-icon.py 里的 GLYPH，然后
+# 编辑 scripts/make-icon.py 里的 GLYPH，比如 ">" 或 "_"
 /tmp/iconvenv/bin/python scripts/make-icon.py
 ```
 
-SVG 里是**路径而不是 `<text>`** —— 依赖字体的图标在没有该字体的机器上会渲染成
-别的样子甚至空白，而图标的意义恰恰在于处处一致。
+两点实现上的讲究:
+
+- **SVG 里是路径而不是 `<text>`。** 依赖字体的图标在没有该字体的机器上会渲染成
+  别的样子甚至空白,而图标的意义恰恰在于处处一致。
+- **光栅版按字形「墨迹」缩放,而不是字号。** 墨迹总比字号小,按字号渲染会让 PNG
+  比 SVG 小一圈,两种格式就对不上了。
 
 ## 服务端
 
@@ -398,11 +411,11 @@ src/
   routes/                public / feed（只负责取页面并转成响应）
 templates/               askama 模板（编译期编入二进制）
 static/style.css         样式，支持深色模式（编译期内嵌）
-static/favicon.svg       站点图标，汉字轮廓（编译期内嵌）
+static/favicon.svg       站点图标，`#` 符号轮廓（编译期内嵌）
 static/favicon.ico       同一图标的 16/32/48 光栅版
 static/favicon-32.png    SVG 不受支持时的回退
 static/apple-touch-icon.png  iOS 主屏图标
-scripts/make-icon.py     重新生成图标（改 GLYPH 即可换字）
+scripts/make-icon.py     重新生成图标（改 GLYPH 即可换符号）
 migrations/0001_schema.sql  唯一的 schema，编译期编入二进制（库每次重建，无需迁移链）
 scripts/smoke.sh         端到端测试
 deploy/                  部署模板 + 公网接入说明（bundle 直接内嵌这些文件）
