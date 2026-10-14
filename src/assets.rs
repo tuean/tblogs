@@ -300,6 +300,23 @@ fn hex(byte: u8) -> Option<u8> {
 /// point: two copies would be free to drift.
 pub const STYLESHEET: &str = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/static/style.css"));
 
+/// Site icons. Embedded like the stylesheet so the server carries no asset
+/// tree, and so the static exporter writes exactly the same bytes.
+///
+/// Sources live in `static/`; `scripts/make-icon.py` regenerates them.
+pub const FAVICON_SVG: &[u8] =
+    include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/static/favicon.svg"));
+pub const FAVICON_ICO: &[u8] =
+    include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/static/favicon.ico"));
+pub const FAVICON_PNG: &[u8] = include_bytes!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/static/favicon-32.png"
+));
+pub const APPLE_TOUCH_ICON: &[u8] = include_bytes!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/static/apple-touch-icon.png"
+));
+
 #[cfg(test)]
 mod tests {
     use super::*;

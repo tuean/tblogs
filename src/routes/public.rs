@@ -175,3 +175,36 @@ pub async fn media(
     )
         .into_response())
 }
+
+/// One embedded icon, with a long cache since the bytes only change with a
+/// release.
+fn icon(bytes: &'static [u8], content_type: &'static str) -> Response {
+    (
+        [
+            (header::CONTENT_TYPE, content_type),
+            (header::CACHE_CONTROL, "public, max-age=86400"),
+        ],
+        bytes,
+    )
+        .into_response()
+}
+
+/// Requested automatically by browsers that do not read the `<link>` tags.
+pub async fn favicon_ico() -> Response {
+    icon(crate::assets::FAVICON_ICO, "image/x-icon")
+}
+
+/// The primary icon: a vector, so it stays sharp at every size.
+pub async fn favicon_svg() -> Response {
+    icon(crate::assets::FAVICON_SVG, "image/svg+xml")
+}
+
+/// Fallback for browsers without SVG favicon support.
+pub async fn favicon_png() -> Response {
+    icon(crate::assets::FAVICON_PNG, "image/png")
+}
+
+/// Home-screen icon on iOS, which fetches this path by convention.
+pub async fn apple_touch_icon() -> Response {
+    icon(crate::assets::APPLE_TOUCH_ICON, "image/png")
+}

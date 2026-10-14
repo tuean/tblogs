@@ -223,6 +223,24 @@ check "GET /tags/nope -> 404" "404" "$(status "$BASE/tags/nope")"
 check "GET /feed.xml -> 200" "200" "$(status "$BASE/feed.xml")"
 check "GET /healthz -> 200" "200" "$(status "$BASE/healthz")"
 check "GET /static/style.css -> 200" "200" "$(status "$BASE/static/style.css")"
+
+# Icons are requested by browsers at fixed paths, so the paths and the content
+# types both matter.
+check "GET /favicon.ico -> 200" "200" "$(status "$BASE/favicon.ico")"
+check "GET /favicon.svg -> 200" "200" "$(status "$BASE/favicon.svg")"
+check "GET /apple-touch-icon.png -> 200" "200" "$(status "$BASE/apple-touch-icon.png")"
+check "the SVG icon is served as an image" "image/svg+xml" \
+  "$(curl -s -o /dev/null -w '%{content_type}' "$BASE/favicon.svg")"
+check "the ICO icon is served as an image" "image/x-icon" \
+  "$(curl -s -o /dev/null -w '%{content_type}' "$BASE/favicon.ico")"
+check_contains "the layout declares the SVG icon" 'rel="icon" href="/favicon.svg"' "$(body "$BASE/")"
+# The ICO must be a real icon container rather than a renamed PNG: browsers
+# sniff the magic bytes and the directory of embedded sizes.
+#   00 00        reserved
+#   01 00        type 1 = icon
+#   03 00        three images (16, 32, 48)
+check "the ICO is a real icon container with three sizes" "000001000300" \
+  "$(xxd -l 6 -p "$ROOT/static/favicon.ico")"
 check "GET /posts/missing -> 404" "404" "$(status "$BASE/posts/missing")"
 
 echo
@@ -389,6 +407,7 @@ check "tblogs-admin export exits 0" "0" "$?"
 SITE="$DIST/site"
 
 for produced in index.html 404.html feed.xml tags.html static/style.css \
+                favicon.ico favicon.svg apple-touch-icon.png \
                 media/assets/pic.png posts/hello.html; do
   if [[ -f "$SITE/$produced" ]]; then
     ok "static export contains $produced"

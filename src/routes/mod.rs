@@ -29,6 +29,12 @@ pub fn router(state: AppState) -> Router {
         // Embedded in the binary at compile time: there is no asset tree to
         // deploy and no build-machine path to resolve.
         .route("/static/style.css", get(public::stylesheet))
+        // Icons, embedded the same way. Browsers ask for /favicon.ico and
+        // /apple-touch-icon.png on their own, so those two paths are fixed.
+        .route("/favicon.ico", get(public::favicon_ico))
+        .route("/favicon.svg", get(public::favicon_svg))
+        .route("/favicon-32.png", get(public::favicon_png))
+        .route("/apple-touch-icon.png", get(public::apple_touch_icon))
         // Images and other assets from the published package. The wildcard is
         // needed because a document may reference a nested folder such as
         // `assets/diagram/flow.png`.

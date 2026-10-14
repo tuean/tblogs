@@ -128,13 +128,24 @@ pub async fn export_site(
     let not_found = site.not_found().await;
     write_page(out_dir, "404.html", &not_found, &mut report)?;
 
-    // The server embeds this; a static host needs it as a real file.
+    // The server embeds these; a static host needs them as real files.
     write(
         out_dir,
         "static/style.css",
         assets::STYLESHEET.as_bytes(),
         &mut report,
     )?;
+
+    // Browsers request /favicon.ico and /apple-touch-icon.png without being
+    // asked, so those two file names are fixed rather than chosen.
+    for (name, bytes) in [
+        ("favicon.ico", assets::FAVICON_ICO),
+        ("favicon.svg", assets::FAVICON_SVG),
+        ("favicon-32.png", assets::FAVICON_PNG),
+        ("apple-touch-icon.png", assets::APPLE_TOUCH_ICON),
+    ] {
+        write(out_dir, name, bytes, &mut report)?;
+    }
 
     // ---- media -----------------------------------------------------------
     report.media_files = copy_tree(media_src, &out_dir.join("media"))?;
