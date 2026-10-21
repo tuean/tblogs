@@ -1,14 +1,24 @@
-/* tblogs — a small, dependency-free stylesheet.
-   Light/dark are driven by prefers-color-scheme; no JS required. */
+/* tblogs — a small stylesheet built on traditional Chinese colours.
+
+   Three themes, all low-saturation and warm, chosen so that long prose does not
+   glare: 宣纸 (xuan paper) is the light default, 茶色 (tea) is a sepia for dim
+   rooms, 墨色 (ink) is the dark one. A reader's choice is kept in localStorage
+   and applied by the page itself; without the script the site falls back to
+   prefers-color-scheme, so nothing depends on JavaScript to be readable. */
+
+/* ---------- 宣纸：暖白纸，墨色字，青瓷为引 ---------- */
 
 :root {
-  --bg: #ffffff;
-  --bg-soft: #f6f7f9;
-  --fg: #1a1d21;
-  --fg-muted: #616a75;
-  --border: #e3e6ea;
-  --accent: #2f6feb;
-  --danger: #c0392b;
+  --bg: #f7f3ea;
+  --bg-soft: #efe9dc;
+  --fg: #2e2a25;
+  --fg-muted: #6a6256;
+  --border: #e3dac9;
+  --accent: #4f7266;
+  --accent-soft: #e2ebe6;
+  --accent-ink: #31544a;
+  --danger: #8f4a4a;
+
   --radius: 8px;
   --measure: 44rem;
 
@@ -22,15 +32,46 @@
   --reading-leading: 1.95;
 }
 
+/* ---------- 茶色：旧纸偏黄，檀赭为引 ---------- */
+
+[data-theme="cha"] {
+  --bg: #efe6d3;
+  --bg-soft: #e6dbc3;
+  --fg: #40382c;
+  --fg-muted: #6a5e4a;
+  --border: #d5c7a9;
+  --accent: #7a5535;
+  --accent-soft: #e9dcc4;
+  --accent-ink: #5d3f26;
+  --danger: #8a3f38;
+}
+
+/* ---------- 墨色：暖黑底，月白字，青瓷为引 ---------- */
+
+[data-theme="mo"] {
+  --bg: #1a1917;
+  --bg-soft: #24221f;
+  --fg: #e7e1d5;
+  --fg-muted: #a29a8b;
+  --border: #34312c;
+  --accent: #8fb6a8;
+  --accent-soft: #26302c;
+  --accent-ink: #b6d3c8;
+  --danger: #d08a80;
+}
+
+/* An explicit choice always wins. Until there is one, follow the system. */
 @media (prefers-color-scheme: dark) {
-  :root {
-    --bg: #16181c;
-    --bg-soft: #1e2126;
-    --fg: #e6e8ea;
-    --fg-muted: #9aa3ad;
-    --border: #2c3037;
-    --accent: #6ea8fe;
-    --danger: #ff7b6b;
+  :root:not([data-theme]) {
+    --bg: #1a1917;
+    --bg-soft: #24221f;
+    --fg: #e7e1d5;
+    --fg-muted: #a29a8b;
+    --border: #34312c;
+    --accent: #8fb6a8;
+    --accent-soft: #26302c;
+    --accent-ink: #b6d3c8;
+    --danger: #d08a80;
   }
 }
 
@@ -323,6 +364,40 @@ article h1 {
   }
 }
 
+/* ---------- theme switcher ---------- */
+
+/* Hidden until the script wires it up: with no JavaScript there is no way to
+   remember a choice, so offering buttons that do nothing would be worse than
+   offering none. The site still follows prefers-color-scheme. */
+.theme-switch {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.42rem;
+}
+
+.theme-switch[hidden] { display: none; }
+
+.theme-dot {
+  width: 1.05rem;
+  height: 1.05rem;
+  padding: 0;
+  border-radius: 50%;
+  border: 1px solid var(--border);
+  cursor: pointer;
+  transition: transform 0.12s ease;
+}
+
+.theme-dot:hover { transform: scale(1.12); }
+
+.theme-dot[data-set-theme="xuanzhi"] { background: #f7f3ea; }
+.theme-dot[data-set-theme="cha"] { background: #efe6d3; }
+.theme-dot[data-set-theme="mo"] { background: #1a1917; }
+
+.theme-dot[aria-pressed="true"] {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
 /* ---------- tags ---------- */
 
 .tag {
@@ -456,9 +531,9 @@ input:focus, textarea:focus, select:focus {
 
 .btn {
   display: inline-block;
-  background: var(--accent);
-  color: #fff;
-  border: 1px solid transparent;
+  background: var(--accent-soft);
+  color: var(--accent-ink);
+  border: 1px solid var(--border);
   border-radius: var(--radius);
   padding: 0.5rem 1rem;
   font: inherit;
@@ -467,7 +542,7 @@ input:focus, textarea:focus, select:focus {
   text-decoration: none;
 }
 
-.btn:hover { filter: brightness(1.08); }
+.btn:hover { border-color: var(--accent); }
 
 .btn-secondary {
   background: transparent;

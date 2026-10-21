@@ -241,6 +241,17 @@ check_contains "the layout declares the SVG icon" 'rel="icon" href="/favicon.svg
 #   03 00        three images (16, 32, 48)
 check "the ICO is a real icon container with three sizes" "000001000300" \
   "$(xxd -l 6 -p "$ROOT/static/favicon.ico")"
+
+# Themes are chosen on the client and remembered there, so the markup and the
+# palettes both have to survive to the page.
+css="$(body "$BASE/static/style.css")"
+check_contains "the stylesheet defines the ink theme" '[data-theme="mo"]' "$css"
+check_contains "the stylesheet defines the tea theme" '[data-theme="cha"]' "$css"
+# The blue accent is what this change removed; keep it from creeping back.
+check_missing "no saturated blue accent remains" '--accent: #2f6feb' "$css"
+check_contains "the theme switcher is in the layout" "data-theme-switch" "$(body "$BASE/")"
+# Hidden until the script reveals it: dead buttons beat no buttons.
+check_contains "the switcher stays hidden without JavaScript" "data-theme-switch hidden" "$(body "$BASE/")"
 check "GET /posts/missing -> 404" "404" "$(status "$BASE/posts/missing")"
 
 echo

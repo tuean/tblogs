@@ -10,6 +10,16 @@
 <link rel="apple-touch-icon" href="/apple-touch-icon.png">
 <link rel="stylesheet" href="/static/style.css">
 <link rel="alternate" type="application/rss+xml" title="{{ site_title }}" href="/feed.xml">
+{#- Applied before the stylesheet paints, otherwise a reader who chose 墨色
+    would see a flash of the light paper on every page load. -#}
+<script>
+(function () {
+  try {
+    var t = localStorage.getItem("tblogs-theme");
+    if (t) { document.documentElement.setAttribute("data-theme", t); }
+  } catch (e) { /* private mode: follow the system instead */ }
+})();
+</script>
 </head>
 <body>
 
@@ -22,6 +32,14 @@
       <a href="/tags">标签</a>
       <a href="/feed.xml">RSS</a>
     </nav>
+    {#- Hidden in the markup, revealed by the script below. Without JavaScript
+        there is no way to remember a choice, so offering dead buttons would be
+        worse than offering none; the site still follows prefers-color-scheme. -#}
+    <div class="theme-switch" data-theme-switch hidden aria-label="主题">
+      <button type="button" class="theme-dot" data-set-theme="xuanzhi" title="宣纸" aria-label="宣纸" aria-pressed="false"></button>
+      <button type="button" class="theme-dot" data-set-theme="cha" title="茶色" aria-label="茶色" aria-pressed="false"></button>
+      <button type="button" class="theme-dot" data-set-theme="mo" title="墨色" aria-label="墨色" aria-pressed="false"></button>
+    </div>
   </div>
 </header>
 
@@ -32,6 +50,43 @@
 <footer class="site-footer">
   <div class="wrap">{{ site_title }} · Rust + axum + SQLite</div>
 </footer>
+
+<script>
+(function () {
+  var box = document.querySelector("[data-theme-switch]");
+  if (!box) { return; }
+
+  var root = document.documentElement;
+  var dots = box.querySelectorAll("[data-set-theme]");
+
+  function mark(active) {
+    for (var i = 0; i < dots.length; i++) {
+      dots[i].setAttribute("aria-pressed", String(dots[i] === active));
+    }
+  }
+
+  // Reflect whatever is in effect, including a system-driven default, so the
+  // ring is never on the wrong swatch.
+  var saved = null;
+  try { saved = localStorage.getItem("tblogs-theme"); } catch (e) {}
+  if (!saved) {
+    saved = window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches
+      ? "mo" : "xuanzhi";
+  }
+  mark(box.querySelector('[data-set-theme="' + saved + '"]'));
+
+  box.addEventListener("click", function (event) {
+    var dot = event.target.closest("[data-set-theme]");
+    if (!dot) { return; }
+    var theme = dot.getAttribute("data-set-theme");
+    root.setAttribute("data-theme", theme);
+    try { localStorage.setItem("tblogs-theme", theme); } catch (e) {}
+    mark(dot);
+  });
+
+  box.hidden = false;
+})();
+</script>
 
 </body>
 </html>
