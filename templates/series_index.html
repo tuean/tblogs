@@ -1,0 +1,22 @@
+{% extends "base.html" %}
+
+{% block title %}小说 · {{ site_title }}{% endblock %}
+
+{% block content %}
+<header class="series-head">
+  <h1>小说</h1>
+</header>
+
+{% if series.is_empty() %}
+<p>还没有连载的内容。在 front matter 里写上 <code>series</code> 和 <code>order</code>，文章就会按顺序归到这里。</p>
+{% else %}
+<ul class="series-list">
+  {% for item in series %}
+  <li>
+    <a href="/series/{{ item.slug|urlencode }}">{{ item.title }}</a>
+    <span class="series-count">{{ item.chapter_count }} 章</span>
+  </li>
+  {% endfor %}
+</ul>
+{% endif %}
+{% endblock %}

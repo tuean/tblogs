@@ -274,6 +274,13 @@ fn humansize(bytes: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use askama::Template;
+
+    use crate::{
+        assets::Assets,
+        pages::{LinkStyle, Site},
+        slug,
+    };
 
     struct Scratch {
         dir: std::path::PathBuf,
@@ -368,6 +375,170 @@ mod tests {
         // Staging is cleaned up.
         assert!(!out.join(".staging").exists());
 
+        std::fs::remove_dir_all(&scratch.dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_series_renders_reading_order_navigation() {
+        let scratch = Scratch::new("series");
+        // Written out of order on disk, and every file gets the same
+        // modification time, so nothing about the *files* hints at the reading
+        // order: only `order:` does.
+        for (file, title, order) in [
+            ("c3.md", "第三章 灯灭", 3),
+            ("c1.md", "第一章 河底的灯", 1),
+            ("c2.md", "第二章 渡客", 2),
+        ] {
+            let slug = file.trim_end_matches(".md");
+            scratch.write(
+                file,
+                &format!(
+                    "---\ntitle: {title}\nslug: {slug}\nseries: 渡记·卷一\norder: {order}\n---\n\n{title}的正文。\n"
+                ),
+            );
+        }
+        scratch.write(
+            "plain.md",
+            "---\ntitle: 一篇普通文章\nslug: plain\n---\n\n与小说无关。\n",
+        );
+
+        let out = scratch.dir.join("dist");
+        let settings = Settings {
+            site_title: "Test".into(),
+            site_description: "Desc".into(),
+            site_url: "https://example.test".into(),
+            built_at: db::now_iso(),
+        };
+
+        build_package(&scratch.dir, &out, &settings, &|_| {})
+            .await
+            .unwrap();
+
+        let pool = db::open_read_only(&out.join(DATABASE_FILE)).await.unwrap();
+        let assets = Assets::new(out.clone()).unwrap();
+        let site = Site {
+            pool: &pool,
+            assets: &assets,
+            settings: &settings,
+            page_size: 10,
+            links: LinkStyle::Path,
+        };
+
+        let render = |slug: &str| {
+            let site = &site;
+            let slug = slug.to_string();
+            async move {
+                site.post(&slug)
+                    .await
+                    .unwrap()
+                    .unwrap_or_else(|| panic!("no rendered page for {slug}"))
+                    .render()
+                    .unwrap()
+            }
+        };
+
+        // The first chapter offers a way forward and a way back to the index,
+        // but nothing to go back to.
+        let first = render("c1").await;
+        assert!(first.contains("下一章"), "first chapter has no next link");
+        assert!(
+            !first.contains("上一章"),
+            "the first chapter has no previous: {first}"
+        );
+        assert!(
+            first.contains("/posts/c2"),
+            "next should point at chapter 2"
+        );
+        assert!(first.contains("/series/"), "a chapter links to its series");
+        assert!(
+            first.contains("渡记·卷一"),
+            "the series is named on the page"
+        );
+
+        // A chapter is read at length, so it switches to the reading layout:
+        // serif text in a narrow column, with the progress bar above it.
+        assert!(
+            first.contains(r#"class="reading""#),
+            "a chapter should use the reading layout: {first}"
+        );
+        assert!(
+            first.contains("reading-progress"),
+            "a chapter should carry the reading progress bar"
+        );
+        assert!(
+            first.contains("reading-series"),
+            "a chapter should name its series above the title"
+        );
+
+        // The last one is the mirror image.
+        let last = render("c3").await;
+        assert!(last.contains("上一章"), "last chapter has no previous link");
+        assert!(
+            !last.contains("下一章"),
+            "the last chapter has no next: {last}"
+        );
+        assert!(
+            last.contains("/posts/c2"),
+            "previous should point at chapter 2"
+        );
+
+        // The middle one links both ways, and the nav is rendered twice — once
+        // above the body and once below it.
+        let middle = render("c2").await;
+        assert!(middle.contains("上一章") && middle.contains("下一章"));
+        assert_eq!(middle.matches("chapter-nav").count(), 2);
+        assert!(middle.contains("/posts/c1") && middle.contains("/posts/c3"));
+
+        // An ordinary post is untouched by any of this.
+        let plain = render("plain").await;
+        assert!(
+            !plain.contains("chapter-nav"),
+            "a plain post gained a nav row"
+        );
+        assert!(!plain.contains("上一章") && !plain.contains("下一章"));
+        assert!(
+            !plain.contains(r#"class="reading""#),
+            "a plain post must keep the denser blog layout"
+        );
+        assert!(!plain.contains("reading-progress"));
+
+        // The series page reads oldest-first, which is the whole point.
+        let series = site
+            .series(&slug::slugify("渡记·卷一"))
+            .await
+            .unwrap()
+            .expect("the series page should exist")
+            .render()
+            .unwrap();
+
+        let first_at = series
+            .find("第一章 河底的灯")
+            .expect("chapter 1 is missing");
+        let last_at = series.find("第三章 灯灭").expect("chapter 3 is missing");
+        assert!(
+            first_at < last_at,
+            "the series page is not in reading order"
+        );
+
+        // And the index of series exists too.
+        let index = site.series_index().await.unwrap().render().unwrap();
+        assert!(index.contains("渡记·卷一"));
+        assert!(
+            index.contains("3 章"),
+            "the chapter count is shown: {index}"
+        );
+
+        // Chapters stay in the feed. This is a decision, not an oversight — see
+        // the note on `Site::feed` — so it is pinned here: a subscriber must not
+        // silently miss the next chapter.
+        let feed = site.feed().await.unwrap().render().unwrap();
+        assert!(
+            feed.contains("第三章 灯灭"),
+            "a chapter should reach the feed"
+        );
+        assert!(feed.contains("一篇普通文章"));
+
+        pool.close().await;
         std::fs::remove_dir_all(&scratch.dir).unwrap();
     }
 

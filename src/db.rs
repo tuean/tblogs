@@ -14,7 +14,7 @@ use sqlx::{
 };
 
 use crate::{
-    models::{Post, Settings, SourcedPost, Tag, TagCount},
+    models::{Post, SeriesSummary, Settings, SourcedPost, Tag, TagCount},
     slug,
 };
 
@@ -22,7 +22,7 @@ use crate::{
 macro_rules! post_columns {
     () => {
         "id, slug, title, summary, body_md, published, created_at, updated_at, \
-         published_at, source_path, cover_image"
+         published_at, source_path, cover_image, series, series_slug, chapter_order"
     };
 }
 
@@ -33,9 +33,21 @@ macro_rules! post_columns {
 macro_rules! post_columns_p {
     () => {
         "p.id, p.slug, p.title, p.summary, p.body_md, p.published, \
-         p.created_at, p.updated_at, p.published_at, p.source_path, p.cover_image"
+         p.created_at, p.updated_at, p.published_at, p.source_path, p.cover_image, \
+         p.series, p.series_slug, p.chapter_order"
     };
 }
+
+// The effective position of a chapter within its series.
+//
+// `chapter_order` is nullable and SQLite sorts NULL before every number, which
+// would put an unordered chapter first *by accident of the storage engine*.
+// Every series query therefore spells out the same `COALESCE` with the sentinel
+// from `models::CHAPTER_ORDER_LAST`, so an unordered chapter sorts last: one
+// hand-broken file must not insert a chapter in front of chapter one.
+//
+// The number is written literally because `concat!` only accepts literals.
+// Three occurrences, one meaning, and a test that pins it to the constant.
 
 /// Current time as an ISO-8601 UTC string, matching the stored format.
 pub fn now_iso() -> String {
@@ -277,6 +289,115 @@ pub async fn find_by_id(pool: &SqlitePool, id: i64) -> Result<Option<Post>> {
     Ok(row)
 }
 
+// ---------------------------------------------------------------- series
+//
+// Chapters are ordinary posts that happen to carry a series name and a
+// position. Nothing here changes how they appear in the feed, on the index or
+// under a tag: those all stay newest-first. Series ordering is a separate axis,
+// used only by a series page and by a chapter's own navigation.
+
+/// Every series with its chapter count, most recently updated first.
+pub async fn list_series(pool: &SqlitePool) -> Result<Vec<SeriesSummary>> {
+    let rows = sqlx::query_as::<_, SeriesSummary>(
+        "SELECT series AS title, series_slug AS slug, COUNT(*) AS chapter_count
+           FROM posts
+          WHERE published = 1 AND series_slug IS NOT NULL
+          GROUP BY series_slug, series
+          ORDER BY MAX(COALESCE(published_at, created_at)) DESC, series",
+    )
+    .fetch_all(pool)
+    .await?;
+
+    Ok(rows)
+}
+
+/// One series, or `None` when no published post claims that slug.
+pub async fn find_series(pool: &SqlitePool, series_slug: &str) -> Result<Option<SeriesSummary>> {
+    let row = sqlx::query_as::<_, SeriesSummary>(
+        "SELECT series AS title, series_slug AS slug, COUNT(*) AS chapter_count
+           FROM posts
+          WHERE published = 1 AND series_slug = ?
+          GROUP BY series_slug, series",
+    )
+    .bind(series_slug)
+    .fetch_optional(pool)
+    .await?;
+
+    Ok(row)
+}
+
+/// The chapters of one series, in reading order.
+///
+/// `chapter_order` ascending is the entire reason a series page exists: the
+/// blog index and the feed stay newest-first, but a novel has to be walked from
+/// the beginning. `id` breaks ties so that two chapters sharing an order still
+/// render in a stable sequence instead of shuffling between requests.
+pub async fn list_series_chapters(pool: &SqlitePool, series_slug: &str) -> Result<Vec<Post>> {
+    let rows = sqlx::query_as::<_, Post>(concat!(
+        "SELECT ",
+        post_columns!(),
+        " FROM posts WHERE published = 1 AND series_slug = ?
+          ORDER BY COALESCE(chapter_order, 9223372036854775807) ASC, id ASC"
+    ))
+    .bind(series_slug)
+    .fetch_all(pool)
+    .await?;
+
+    Ok(rows)
+}
+
+/// The chapters immediately before and after `post` within its series.
+///
+/// Neighbours are by position, not by publication time: chapters are written
+/// and published in whatever order suits the author, but read in one. The
+/// comparison includes `id` so that chapters sharing an `order` still have a
+/// defined predecessor and successor rather than both being "next".
+pub async fn chapter_neighbours(
+    pool: &SqlitePool,
+    post: &Post,
+) -> Result<(Option<Post>, Option<Post>)> {
+    let Some(series_slug) = post.series_slug.as_deref() else {
+        return Ok((None, None));
+    };
+    let order = post.order_key();
+
+    let previous = sqlx::query_as::<_, Post>(concat!(
+        "SELECT ",
+        post_columns!(),
+        " FROM posts
+          WHERE published = 1 AND series_slug = ?
+            AND (COALESCE(chapter_order, 9223372036854775807) < ?
+                 OR (COALESCE(chapter_order, 9223372036854775807) = ? AND id < ?))
+          ORDER BY COALESCE(chapter_order, 9223372036854775807) DESC, id DESC
+          LIMIT 1"
+    ))
+    .bind(series_slug)
+    .bind(order)
+    .bind(order)
+    .bind(post.id)
+    .fetch_optional(pool)
+    .await?;
+
+    let next = sqlx::query_as::<_, Post>(concat!(
+        "SELECT ",
+        post_columns!(),
+        " FROM posts
+          WHERE published = 1 AND series_slug = ?
+            AND (COALESCE(chapter_order, 9223372036854775807) > ?
+                 OR (COALESCE(chapter_order, 9223372036854775807) = ? AND id > ?))
+          ORDER BY COALESCE(chapter_order, 9223372036854775807) ASC, id ASC
+          LIMIT 1"
+    ))
+    .bind(series_slug)
+    .bind(order)
+    .bind(order)
+    .bind(post.id)
+    .fetch_optional(pool)
+    .await?;
+
+    Ok((previous, next))
+}
+
 /// Tags for every post, keyed by post id.
 ///
 /// Deliberately unfiltered: a lean blog has few tags, and loading them all
@@ -426,6 +547,16 @@ pub async fn sync_sourced_post(pool: &SqlitePool, input: &SourcedPost) -> Result
         .or_else(|| input.date_hint.clone())
         .unwrap_or_else(|| now.clone());
 
+    // Slugified once here so every chapter of one series agrees on its URL
+    // without having to be told twice. A series name that slugifies to nothing
+    // (all punctuation) leaves the slug NULL: the chapters still carry the
+    // series name and stay ordered, they simply have no series page.
+    let series_slug = input
+        .series
+        .as_deref()
+        .map(slug::slugify)
+        .filter(|value| !value.is_empty());
+
     let mut tx = pool.begin().await?;
 
     let id = match &existing {
@@ -434,7 +565,8 @@ pub async fn sync_sourced_post(pool: &SqlitePool, input: &SourcedPost) -> Result
                 "UPDATE posts
                     SET slug = ?, title = ?, summary = ?, body_md = ?, published = ?,
                         created_at = ?, updated_at = ?, published_at = ?,
-                        source_mtime = ?, cover_image = ?
+                        source_mtime = ?, cover_image = ?,
+                        series = ?, series_slug = ?, chapter_order = ?
                   WHERE id = ?",
             )
             .bind(&slug)
@@ -447,6 +579,9 @@ pub async fn sync_sourced_post(pool: &SqlitePool, input: &SourcedPost) -> Result
             .bind(&published_at)
             .bind(input.source_mtime)
             .bind(&input.cover_image)
+            .bind(&input.series)
+            .bind(&series_slug)
+            .bind(input.order)
             .bind(post.id)
             .execute(&mut *tx)
             .await?;
@@ -457,8 +592,9 @@ pub async fn sync_sourced_post(pool: &SqlitePool, input: &SourcedPost) -> Result
             let result = sqlx::query(
                 "INSERT INTO posts
                      (slug, title, summary, body_md, published, created_at, updated_at,
-                      published_at, source_path, source_mtime, cover_image)
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                      published_at, source_path, source_mtime, cover_image,
+                      series, series_slug, chapter_order)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             )
             .bind(&slug)
             .bind(&input.title)
@@ -471,6 +607,9 @@ pub async fn sync_sourced_post(pool: &SqlitePool, input: &SourcedPost) -> Result
             .bind(&input.source_path)
             .bind(input.source_mtime)
             .bind(&input.cover_image)
+            .bind(&input.series)
+            .bind(&series_slug)
+            .bind(input.order)
             .execute(&mut *tx)
             .await?;
 
@@ -661,6 +800,20 @@ mod tests {
             updated_at: now_iso(),
             tags: normalise_tags(&names),
             cover_image: None,
+            series: None,
+            order: None,
+        }
+    }
+
+    /// A chapter of `series` at position `order`.
+    ///
+    /// Built on top of [`sourced`] so a chapter differs from an ordinary post in
+    /// exactly the two fields the feature adds.
+    fn chapter(source: &str, title: &str, body: &str, series: &str, order: i64) -> SourcedPost {
+        SourcedPost {
+            series: Some(series.to_string()),
+            order: Some(order),
+            ..sourced(source, title, body, "", true)
         }
     }
 
@@ -878,5 +1031,290 @@ mod tests {
         assert_eq!(list_published(&pool, 2, 0).await.unwrap().len(), 2);
         assert_eq!(list_published(&pool, 2, 4).await.unwrap().len(), 1);
         assert_eq!(list_published(&pool, 2, 99).await.unwrap().len(), 0);
+    }
+
+    // ------------------------------------------------------------ series
+
+    /// The stored slug for a series name, as the builder computes it.
+    fn series_of(pool: &SqlitePool, name: &str) -> String {
+        let _ = pool;
+        slug::slugify(name)
+    }
+
+    #[tokio::test]
+    async fn a_series_lists_its_chapters_in_reading_order() {
+        let pool = test_pool().await;
+        let series = "渡记·卷一";
+        let series_slug = series_of(&pool, series);
+
+        // Imported last-chapter-first, so publication time runs exactly
+        // opposite to reading order. This is the case a plain
+        // `ORDER BY published_at` gets backwards.
+        for (file, title, order) in [
+            ("c3.md", "第三章", 3),
+            ("c1.md", "第一章", 1),
+            ("c2.md", "第二章", 2),
+        ] {
+            import(&pool, &chapter(file, title, "正文", series, order)).await;
+        }
+
+        let chapters = list_series_chapters(&pool, &series_slug).await.unwrap();
+        let titles: Vec<&str> = chapters.iter().map(|c| c.title.as_str()).collect();
+        assert_eq!(titles, vec!["第一章", "第二章", "第三章"]);
+
+        // The index is untouched: it stays newest-first.
+        let feed = list_published(&pool, 10, 0).await.unwrap();
+        assert_eq!(feed.first().map(|p| p.title.as_str()), Some("第二章"));
+    }
+
+    #[tokio::test]
+    async fn chapters_sharing_an_order_still_have_one_sequence() {
+        let pool = test_pool().await;
+        let series = "渡记·卷一";
+        let series_slug = series_of(&pool, series);
+
+        for (file, title) in [("a.md", "甲"), ("b.md", "乙"), ("c.md", "丙")] {
+            import(&pool, &chapter(file, title, "正文", series, 5)).await;
+        }
+
+        // Read twice: a tie broken by anything unstable (a hash order, a plan
+        // change) would shuffle the chapters between requests.
+        let first = list_series_chapters(&pool, &series_slug).await.unwrap();
+        let second = list_series_chapters(&pool, &series_slug).await.unwrap();
+
+        let titles = |posts: &[Post]| posts.iter().map(|p| p.title.clone()).collect::<Vec<_>>();
+        assert_eq!(titles(&first), vec!["甲", "乙", "丙"]);
+        assert_eq!(titles(&first), titles(&second));
+
+        // And each still has a defined predecessor and successor rather than
+        // both neighbours claiming to be "next".
+        let middle = &first[1];
+        let (prev, next) = chapter_neighbours(&pool, middle).await.unwrap();
+        assert_eq!(prev.map(|p| p.title), Some("甲".to_string()));
+        assert_eq!(next.map(|p| p.title), Some("丙".to_string()));
+    }
+
+    #[tokio::test]
+    async fn the_ends_of_a_series_have_only_one_neighbour() {
+        let pool = test_pool().await;
+        let series = "渡记·卷一";
+        let series_slug = series_of(&pool, series);
+
+        for (file, title, order) in [
+            ("c1.md", "第一章", 1),
+            ("c2.md", "第二章", 2),
+            ("c3.md", "第三章", 3),
+        ] {
+            import(&pool, &chapter(file, title, "正文", series, order)).await;
+        }
+
+        let chapters = list_series_chapters(&pool, &series_slug).await.unwrap();
+
+        let (prev, next) = chapter_neighbours(&pool, &chapters[0]).await.unwrap();
+        assert!(prev.is_none(), "chapter 1 has no previous");
+        assert_eq!(next.map(|p| p.title), Some("第二章".to_string()));
+
+        let (prev, next) = chapter_neighbours(&pool, &chapters[2]).await.unwrap();
+        assert_eq!(prev.map(|p| p.title), Some("第二章".to_string()));
+        assert!(next.is_none(), "the last chapter has no next");
+    }
+
+    #[tokio::test]
+    async fn a_post_outside_a_series_gets_no_navigation() {
+        let pool = test_pool().await;
+        import(&pool, &sourced("plain.md", "普通文章", "正文", "", true)).await;
+        // A chapter in another series must not become its neighbour either.
+        import(
+            &pool,
+            &chapter("other.md", "别处的第一章", "正文", "另一部", 1),
+        )
+        .await;
+
+        let plain = find_published_by_slug(&pool, "plain")
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(plain.series.is_none());
+        assert!(plain.series_slug.is_none());
+        assert!(plain.chapter_order.is_none());
+        // The fallback position exists, but nothing consults it for a row with
+        // no series: there is no list to sort it into and no neighbours to find.
+        assert_eq!(plain.order_key(), crate::models::CHAPTER_ORDER_LAST);
+
+        let (prev, next) = chapter_neighbours(&pool, &plain).await.unwrap();
+        assert!(prev.is_none() && next.is_none());
+    }
+
+    #[tokio::test]
+    async fn two_series_do_not_interfere() {
+        let pool = test_pool().await;
+        let (one, other) = ("渡记·卷一", "渡记·卷二");
+        let one_slug = series_of(&pool, one);
+        let other_slug = series_of(&pool, other);
+
+        import(&pool, &chapter("a1.md", "卷一·一", "正文", one, 1)).await;
+        import(&pool, &chapter("a2.md", "卷一·二", "正文", one, 2)).await;
+        import(&pool, &chapter("b1.md", "卷二·一", "正文", other, 1)).await;
+
+        let first = list_series_chapters(&pool, &one_slug).await.unwrap();
+        assert_eq!(first.len(), 2);
+        assert_eq!(first[1].title, "卷一·二");
+
+        let second = list_series_chapters(&pool, &other_slug).await.unwrap();
+        assert_eq!(second.len(), 1);
+        assert_eq!(second[0].title, "卷二·一");
+
+        // The last chapter of volume one must not point into volume two.
+        let (_, next) = chapter_neighbours(&pool, &first[1]).await.unwrap();
+        assert!(next.is_none(), "series boundaries must hold");
+
+        // Each series is counted and located separately. Compared as a set:
+        // every import in this test shares a timestamp, so which series comes
+        // first is the alphabetical tiebreak, not a property worth asserting
+        // here — that is covered by the ordering test below.
+        let all = list_series(&pool).await.unwrap();
+        assert_eq!(all.len(), 2);
+        let mut counts: Vec<(String, i64)> = all
+            .iter()
+            .map(|s| (s.title.clone(), s.chapter_count))
+            .collect();
+        counts.sort();
+        assert_eq!(counts, vec![(one.to_string(), 2), (other.to_string(), 1)]);
+
+        let found = find_series(&pool, &one_slug).await.unwrap().unwrap();
+        assert_eq!(found.title, one);
+        assert_eq!(found.chapter_count, 2);
+
+        assert!(find_series(&pool, "没有这一部").await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn the_series_index_lists_the_most_recently_updated_first() {
+        let pool = test_pool().await;
+
+        // Explicit dates, because the ordering has to be decided by the data
+        // rather than by how fast the two imports happened to run.
+        let mut old = chapter("a1.md", "旧作·一", "正文", "旧作", 1);
+        old.date_hint = Some("2026-01-01T00:00:00Z".into());
+        import(&pool, &old).await;
+
+        let mut new = chapter("b1.md", "新作·一", "正文", "新作", 1);
+        new.date_hint = Some("2026-06-01T00:00:00Z".into());
+        import(&pool, &new).await;
+
+        let titles: Vec<String> = list_series(&pool)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|s| s.title)
+            .collect();
+        assert_eq!(titles, vec!["新作", "旧作"]);
+    }
+
+    #[tokio::test]
+    async fn an_unordered_chapter_sorts_last_and_cannot_break_the_sequence() {
+        let pool = test_pool().await;
+        let series = "渡记·卷一";
+        let series_slug = series_of(&pool, series);
+
+        import(&pool, &chapter("c1.md", "第一章", "正文", series, 1)).await;
+        import(&pool, &chapter("c2.md", "第二章", "正文", series, 2)).await;
+        // Front matter whose `order:` did not survive parsing.
+        let mut unordered = chapter("c9.md", "忘了编号", "正文", series, 1);
+        unordered.order = None;
+        import(&pool, &unordered).await;
+
+        let chapters = list_series_chapters(&pool, &series_slug).await.unwrap();
+        let titles: Vec<&str> = chapters.iter().map(|c| c.title.as_str()).collect();
+        assert_eq!(titles, vec!["第一章", "第二章", "忘了编号"]);
+
+        // The important part: the first chapter still has nothing before it, so
+        // a reader following the navigation is never sent backwards into the
+        // unnumbered chapter.
+        let (prev, next) = chapter_neighbours(&pool, &chapters[0]).await.unwrap();
+        assert!(
+            prev.is_none(),
+            "one broken file must not give chapter 1 a previous"
+        );
+        assert_eq!(next.map(|p| p.title), Some("第二章".to_string()));
+
+        // The unnumbered chapter is the last one, and has no next.
+        let (prev, next) = chapter_neighbours(&pool, &chapters[2]).await.unwrap();
+        assert_eq!(prev.map(|p| p.title), Some("第二章".to_string()));
+        assert!(next.is_none());
+    }
+
+    #[tokio::test]
+    async fn the_order_sentinel_sorts_after_any_realistic_position() {
+        let pool = test_pool().await;
+        let series = "渡记·卷一";
+        let series_slug = series_of(&pool, series);
+
+        // An absurd but real position, to show the sentinel is above it.
+        import(
+            &pool,
+            &chapter("big.md", "很大的编号", "正文", series, i64::MAX - 1),
+        )
+        .await;
+        let mut unordered = chapter("none.md", "没有编号", "正文", series, 1);
+        unordered.order = None;
+        import(&pool, &unordered).await;
+
+        let chapters = list_series_chapters(&pool, &series_slug).await.unwrap();
+        assert_eq!(chapters[0].title, "很大的编号");
+        assert_eq!(chapters[1].title, "没有编号");
+
+        // And the model agrees with the SQL about which position that is.
+        assert_eq!(chapters[1].order_key(), crate::models::CHAPTER_ORDER_LAST);
+    }
+
+    #[tokio::test]
+    async fn a_series_name_that_slugifies_to_nothing_has_no_page() {
+        let pool = test_pool().await;
+
+        // The chapters still carry the name and stay ordered; they simply have
+        // no URL to live at, which is better than a `/series/` index page.
+        import(&pool, &chapter("a.md", "甲", "正文", "···", 1)).await;
+        import(&pool, &chapter("b.md", "乙", "正文", "···", 2)).await;
+
+        let post = find_published_by_slug(&pool, "a").await.unwrap().unwrap();
+        assert_eq!(post.series.as_deref(), Some("···"));
+        assert!(post.series_slug.is_none());
+
+        assert!(list_series(&pool).await.unwrap().is_empty());
+        let (prev, next) = chapter_neighbours(&pool, &post).await.unwrap();
+        assert!(prev.is_none() && next.is_none());
+    }
+
+    #[tokio::test]
+    async fn a_draft_chapter_stays_out_of_its_series() {
+        let pool = test_pool().await;
+        let series = "渡记·卷一";
+        let series_slug = series_of(&pool, series);
+
+        import(&pool, &chapter("c1.md", "第一章", "正文", series, 1)).await;
+        let mut draft = chapter("c2.md", "第二章（未完成）", "正文", series, 2);
+        draft.published = false;
+        import(&pool, &draft).await;
+
+        let chapters = list_series_chapters(&pool, &series_slug).await.unwrap();
+        assert_eq!(
+            chapters.len(),
+            1,
+            "a draft is not part of the public series"
+        );
+
+        // The published first chapter therefore has no next yet.
+        let (_, next) = chapter_neighbours(&pool, &chapters[0]).await.unwrap();
+        assert!(next.is_none());
+
+        assert_eq!(
+            find_series(&pool, &series_slug)
+                .await
+                .unwrap()
+                .unwrap()
+                .chapter_count,
+            1
+        );
     }
 }

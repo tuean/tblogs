@@ -25,6 +25,13 @@ pub struct Post {
     pub source_path: String,
     /// Cover image URL, ready to use as written in a template.
     pub cover_image: Option<String>,
+    /// Series display name, when this post is a chapter of one.
+    pub series: Option<String>,
+    /// URL form of `series`; always set when `series` is.
+    pub series_slug: Option<String>,
+    /// Position within the series. `None` for a series member whose front
+    /// matter carried no usable `order:`, which sorts as `0`.
+    pub chapter_order: Option<i64>,
 }
 
 impl Post {
@@ -36,6 +43,11 @@ impl Post {
             .as_deref()
             .unwrap_or(self.updated_at.as_str());
         format_local_date(raw)
+    }
+
+    /// The position used for ordering, with an absent `order` read as last.
+    pub fn order_key(&self) -> i64 {
+        self.chapter_order.unwrap_or(CHAPTER_ORDER_LAST)
     }
 }
 
@@ -58,6 +70,9 @@ impl<'r> sqlx::FromRow<'r, SqliteRow> for Post {
             published_at: row.try_get("published_at")?,
             source_path: row.try_get("source_path")?,
             cover_image: row.try_get("cover_image")?,
+            series: row.try_get("series")?,
+            series_slug: row.try_get("series_slug")?,
+            chapter_order: row.try_get("chapter_order")?,
         })
     }
 }
@@ -85,6 +100,68 @@ pub struct SourcedPost {
     /// Cover image exactly as the front matter wrote it; the renderer resolves
     /// it so a local path becomes a `/media/...` URL.
     pub cover_image: Option<String>,
+    /// Series this document belongs to, straight from its front matter.
+    pub series: Option<String>,
+    /// Position within that series, when the front matter carried one.
+    pub order: Option<i64>,
+}
+
+/// Sort position given to a chapter whose front matter carried no usable
+/// `order:`.
+///
+/// `i64::MAX`, so such a chapter sorts after every position an author could
+/// plausibly type. The alternative — treating it as `0` — reads better to an
+/// author looking for the gap, but it lets one hand-broken file corrupt the
+/// reading sequence: an unnumbered chapter would appear *in front of* chapter
+/// one and become its 「上一章」. A reader following the navigation must never be
+/// sent backwards, so the unnumbered chapter goes last, where it is still
+/// plainly visible as the only unnumbered entry in the contents.
+///
+/// The same value is written literally into the series queries in `db.rs`,
+/// because `concat!` only accepts literals; a test pins the two together.
+pub const CHAPTER_ORDER_LAST: i64 = i64::MAX;
+
+/// One series, as shown on the `/series` index.
+#[derive(Debug, Clone)]
+pub struct SeriesSummary {
+    /// Display name, i.e. the `series` value itself.
+    pub title: String,
+    pub slug: String,
+    pub chapter_count: i64,
+}
+
+// Hand-written for the same reason as `Post`: no sqlx-macros proc macro.
+impl<'r> sqlx::FromRow<'r, SqliteRow> for SeriesSummary {
+    fn from_row(row: &'r SqliteRow) -> Result<Self, sqlx::Error> {
+        Ok(Self {
+            title: row.try_get("title")?,
+            slug: row.try_get("slug")?,
+            chapter_count: row.try_get("chapter_count")?,
+        })
+    }
+}
+
+/// Enough of a chapter to link to it from the navigation row.
+#[derive(Debug, Clone)]
+pub struct ChapterLink {
+    pub title: String,
+    pub slug: String,
+}
+
+/// The reading-order navigation shown on a chapter page.
+///
+/// `prev` and `next` are the chapters adjacent in `chapter_order`, which is not
+/// the same thing as the posts adjacent in publication time — that is the whole
+/// point, since a novel is published in whatever order the author gets round to
+/// it but must be read in one.
+#[derive(Debug, Clone)]
+pub struct ChapterNav {
+    pub series: String,
+    pub series_slug: String,
+    /// Position of the chapter being viewed.
+    pub order: i64,
+    pub prev: Option<ChapterLink>,
+    pub next: Option<ChapterLink>,
 }
 
 /// A date for display, in the machine's time zone.
@@ -199,6 +276,12 @@ pub struct PostView {
     /// empty string rather than an `Option` so templates stay free of
     /// unwrapping.
     pub cover: String,
+    /// True when this post is a chapter of a series.
+    ///
+    /// A chapter is read at length, so the page switches to the reading
+    /// layout: serif text, a narrower column, indented paragraphs. An ordinary
+    /// post keeps the denser blog layout.
+    pub reading: bool,
 }
 
 /// Clean up tag names coming from front matter.
@@ -266,6 +349,9 @@ mod tests {
             published_at: published_at.map(str::to_string),
             source_path: "post.md".into(),
             cover_image: None,
+            series: None,
+            series_slug: None,
+            chapter_order: None,
         }
     }
 

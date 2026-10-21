@@ -65,6 +65,29 @@ pub async fn post_detail(
     super::render(&page)
 }
 
+/// The list of series.
+pub async fn series_index(State(state): State<AppState>) -> Result<Html<String>, AppError> {
+    let snapshot = state.current().await;
+    let page = site(&state, &snapshot).series_index().await?;
+
+    super::render(&page)
+}
+
+/// One series, with its chapters in reading order.
+pub async fn series_detail(
+    State(state): State<AppState>,
+    Path(slug): Path<String>,
+) -> Result<Html<String>, AppError> {
+    let snapshot = state.current().await;
+
+    let page = site(&state, &snapshot)
+        .series(&slug)
+        .await?
+        .ok_or_else(|| AppError::not_found(format!("小说「{slug}」不存在")))?;
+
+    super::render(&page)
+}
+
 /// The tag cloud.
 pub async fn tags_index(State(state): State<AppState>) -> Result<Html<String>, AppError> {
     let snapshot = state.current().await;

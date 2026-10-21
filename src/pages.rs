@@ -15,10 +15,10 @@ use sqlx::SqlitePool;
 use crate::{
     assets::Assets,
     db, markdown,
-    models::{Post, PostView, Settings, Tag},
+    models::{ChapterLink, ChapterNav, Post, PostView, Settings, Tag},
     templates::{
-        FeedItem, FeedTemplate, IndexTemplate, NotFoundTemplate, PostTemplate, TagTemplate,
-        TagsTemplate,
+        FeedItem, FeedTemplate, IndexTemplate, NotFoundTemplate, PostTemplate, SeriesIndexTemplate,
+        SeriesTemplate, TagTemplate, TagsTemplate,
     },
     util::{self, paginate, paginate_static},
 };
@@ -94,10 +94,44 @@ impl<'a> Site<'a> {
 
         let tag_map = db::tags_by_post(self.pool).await?;
 
+        // Read the neighbours before `to_view` consumes the row.
+        let nav = chapter_nav(self.pool, &post).await?;
+
         Ok(Some(PostTemplate {
             site_title: self.title(),
             site_description: self.description(),
             post: self.to_view(post, &tag_map, true),
+            nav,
+        }))
+    }
+
+    /// The list of series.
+    pub async fn series_index(&self) -> Result<SeriesIndexTemplate> {
+        Ok(SeriesIndexTemplate {
+            site_title: self.title(),
+            site_description: self.description(),
+            series: db::list_series(self.pool).await?,
+        })
+    }
+
+    /// One series with its chapters in reading order, or `None` when it has no
+    /// published chapters.
+    pub async fn series(&self, slug: &str) -> Result<Option<SeriesTemplate>> {
+        let Some(series) = db::find_series(self.pool, slug).await? else {
+            return Ok(None);
+        };
+
+        let chapters = db::list_series_chapters(self.pool, &series.slug).await?;
+        let tag_map = db::tags_by_post(self.pool).await?;
+
+        Ok(Some(SeriesTemplate {
+            site_title: self.title(),
+            site_description: self.description(),
+            series,
+            chapters: chapters
+                .into_iter()
+                .map(|post| self.to_view(post, &tag_map, false))
+                .collect(),
         }))
     }
 
@@ -143,6 +177,16 @@ impl<'a> Site<'a> {
 
     /// The RSS feed.
     pub async fn feed(&self) -> Result<FeedTemplate> {
+        // Chapters appear here like any other post, and deliberately so.
+        //
+        // A series is serialized: a subscriber wants to be told when the next
+        // chapter lands, and a feed that silently omitted the main thing the
+        // site publishes would be worse than useless, because a reader cannot
+        // tell "no new chapter" from "chapters are filtered out". The feed
+        // stays in publication order, newest first, which is what an RSS reader
+        // expects; reading order belongs to the series page and to the chapter
+        // navigation, not to a channel whose whole job is announcing what
+        // changed.
         let posts = db::list_published(self.pool, FEED_LIMIT, 0).await?;
 
         Ok(FeedTemplate {
@@ -214,6 +258,9 @@ impl<'a> Site<'a> {
             })
             .unwrap_or_default();
 
+        // Read before the fields are moved out below.
+        let reading = post.series.is_some();
+
         PostView {
             slug: post.slug,
             title: post.title,
@@ -222,8 +269,35 @@ impl<'a> Site<'a> {
             date,
             tags,
             cover,
+            reading,
         }
     }
+}
+
+/// Reading-order navigation for a post, or `None` when it is not a chapter.
+///
+/// A post is a chapter when its front matter named a series. The series name is
+/// not enough on its own — a series whose name slugifies to nothing has no page
+/// to point at — so both halves have to be present for the row to be usable.
+async fn chapter_nav(pool: &SqlitePool, post: &Post) -> Result<Option<ChapterNav>> {
+    let (Some(series), Some(series_slug)) = (post.series.clone(), post.series_slug.clone()) else {
+        return Ok(None);
+    };
+
+    let (prev, next) = db::chapter_neighbours(pool, post).await?;
+
+    let link = |chapter: Post| ChapterLink {
+        title: chapter.title,
+        slug: chapter.slug,
+    };
+
+    Ok(Some(ChapterNav {
+        series,
+        series_slug,
+        order: post.order_key(),
+        prev: prev.map(link),
+        next: next.map(link),
+    }))
 }
 
 /// Publication time in RFC 2822, which RSS 2.0 requires.
@@ -256,6 +330,9 @@ mod tests {
             published_at: Some("2026-03-04T05:06:07Z".into()),
             source_path: "s.md".into(),
             cover_image: None,
+            series: None,
+            series_slug: None,
+            chapter_order: None,
         };
 
         let stamp = rfc2822(&post);
@@ -277,6 +354,9 @@ mod tests {
             published_at: None,
             source_path: "s.md".into(),
             cover_image: None,
+            series: None,
+            series_slug: None,
+            chapter_order: None,
         };
 
         // A junk timestamp must not panic; it yields the current time instead.

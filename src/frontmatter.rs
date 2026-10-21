@@ -35,6 +35,19 @@ pub struct FrontMatter {
     /// against the content directory like any other asset reference.
     pub image: Option<String>,
     pub draft: bool,
+    /// The series this document belongs to, as a free display string.
+    ///
+    /// Grouping is by exact string equality rather than a shared identifier,
+    /// which is what lets one program write the chapters and another read them
+    /// without first agreeing on a registry. `渡记·卷一` in two files means the
+    /// same series; the same text with a trailing space would not, so the value
+    /// is trimmed on the way in.
+    pub series: Option<String>,
+    /// Position within the series, ascending.
+    ///
+    /// Absent and unparseable are deliberately the same thing — see
+    /// [`parse_int`].
+    pub order: Option<i64>,
 }
 
 /// A Markdown file split into its front matter and its body.
@@ -158,6 +171,12 @@ fn parse_block(lines: &[String]) -> FrontMatter {
                 front.summary = non_empty(unquote(value));
             }
             "image" | "cover" | "thumbnail" => front.image = non_empty(unquote(value)),
+            // The chapter contract: `series` names the work, `order` places the
+            // document within it. Only these two spellings are accepted, so a
+            // typo shows up as an unsorted chapter rather than as a second
+            // series with a nearly identical name.
+            "series" => front.series = non_empty(unquote(value)),
+            "order" => front.order = parse_int(value),
             "date" | "published" | "pubdate" => front.date = parse_date(value),
             "draft" => front.draft = parse_bool(value),
             "tags" | "tag" | "categories" | "keywords" => {
@@ -202,6 +221,17 @@ fn unquote(value: &str) -> String {
         }
     }
     value.to_string()
+}
+
+/// Parse an integer, returning `None` for anything that is not one.
+///
+/// A malformed `order` costs the document its position and nothing else: it
+/// still has a title, a body and a date, and it still publishes. Rejecting the
+/// whole document over a typo would drop a chapter out of a novel, which is a
+/// much worse outcome than a chapter that sorts first — and it matches how the
+/// parser already treats every key it does not understand.
+fn parse_int(value: &str) -> Option<i64> {
+    unquote(value).trim().parse::<i64>().ok()
 }
 
 fn non_empty(value: String) -> Option<String> {
@@ -302,6 +332,75 @@ pub fn split_date_prefix(stem: &str) -> (Option<String>, &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parses_series_and_order() {
+        let doc = parse("---\nseries: 渡记·卷一\norder: 1\n---\n\nBody\n");
+        assert_eq!(doc.front.series.as_deref(), Some("渡记·卷一"));
+        assert_eq!(doc.front.order, Some(1));
+        assert_eq!(doc.body.trim(), "Body");
+    }
+
+    #[test]
+    fn a_series_member_may_have_no_order() {
+        let doc = parse("---\nseries: 渡记·卷一\n---\n\nBody\n");
+        assert_eq!(doc.front.series.as_deref(), Some("渡记·卷一"));
+        assert_eq!(doc.front.order, None);
+    }
+
+    #[test]
+    fn a_malformed_order_is_ignored_rather_than_fatal() {
+        // A typo must cost the chapter its position and nothing else: the file
+        // still has a title, a series and a body, and must still build. This is
+        // the same tolerance the parser shows every key it cannot read.
+        for bad in ["一", "1.5", "one", "-", "1,2", "--3", "1e2"] {
+            let raw = format!("---\ntitle: 第一章\nseries: 渡记\norder: {bad}\n---\n\nBody\n");
+            let doc = parse(&raw);
+
+            assert_eq!(doc.front.order, None, "order {bad:?} should be ignored");
+            assert_eq!(doc.front.title.as_deref(), Some("第一章"));
+            assert_eq!(doc.front.series.as_deref(), Some("渡记"));
+            assert_eq!(doc.body.trim(), "Body");
+        }
+    }
+
+    #[test]
+    fn orders_may_be_quoted_signed_or_padded() {
+        // An author copying a value out of a YAML example often ends up with
+        // quotes; that is still an order.
+        for (raw, want) in [
+            ("order: \"12\"", 12),
+            ("order: '3'", 3),
+            ("order: -1", -1),
+            ("order:   7   ", 7),
+            // Zero is a legitimate position, not a missing value.
+            ("order: 0", 0),
+        ] {
+            let doc = parse(&format!("---\n{raw}\n---\n\nBody\n"));
+            assert_eq!(doc.front.order, Some(want), "for {raw:?}");
+        }
+    }
+
+    #[test]
+    fn a_document_without_the_keys_is_unchanged() {
+        // The blog must not regress. A directory of ordinary posts has to parse
+        // to exactly what it parsed to before series existed.
+        let doc = parse(
+            "---\n\
+             title: 我的第一篇博客\n\
+             date: 2026-01-01 10:30\n\
+             tags: [Rust, 随笔]\n\
+             ---\n\
+             Body\n",
+        );
+
+        assert_eq!(doc.front.series, None);
+        assert_eq!(doc.front.order, None);
+        assert_eq!(doc.front.tags, vec!["Rust", "随笔"]);
+
+        // And a file with no front matter at all is still the default.
+        assert_eq!(parse("# Just a body\n").front, FrontMatter::default());
+    }
 
     #[test]
     fn parses_a_full_block() {

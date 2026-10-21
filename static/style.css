@@ -11,6 +11,15 @@
   --danger: #c0392b;
   --radius: 8px;
   --measure: 44rem;
+
+  /* Reading mode: a serif for long-form prose, and a narrower column than the
+     blog layout uses. The stack goes macOS, then Windows, then Linux, so the
+     same page looks native everywhere. */
+  --serif: "Songti SC", "STSong", "SimSun", "Noto Serif CJK SC",
+           "Source Han Serif SC", Georgia, serif;
+  --reading-measure: 33rem;
+  --reading-size: 1.16rem;
+  --reading-leading: 1.95;
 }
 
 @media (prefers-color-scheme: dark) {
@@ -198,6 +207,122 @@ article h1 {
   text-align: left;
 }
 
+/* ---------- reading mode ---------- */
+
+/* A chapter is read for a long stretch, so it gets what a blog post does not:
+   a serif, slightly larger type, a narrower column, and the Chinese convention
+   of indenting the first line instead of separating paragraphs with blank
+   lines. Ordinary posts never match these selectors. */
+
+.reading {
+  max-width: var(--reading-measure);
+  margin: 0 auto;
+}
+
+.reading header { text-align: center; margin-bottom: 2.75rem; }
+
+.reading h1 {
+  font-family: var(--serif);
+  font-size: 1.75rem;
+  font-weight: 600;
+  line-height: 1.4;
+  letter-spacing: 0.01em;
+  margin: 0 0 0.75rem;
+}
+
+.reading-series {
+  margin: 0 0 1.1rem;
+  font-size: 0.85rem;
+  letter-spacing: 0.16em;
+}
+
+.reading-series a { color: var(--fg-muted); text-decoration: none; }
+.reading-series a:hover { color: var(--accent); }
+
+.reading-meta {
+  margin: 0;
+  font-size: 0.82rem;
+  letter-spacing: 0.06em;
+  color: var(--fg-muted);
+}
+
+.reading .prose {
+  font-family: var(--serif);
+  font-size: var(--reading-size);
+  line-height: var(--reading-leading);
+  /* Chinese prose reads better justified, and the browser can break between
+     ideographs, so this does not create the rivers that it can in Latin text. */
+  text-align: justify;
+  text-justify: inter-ideograph;
+}
+
+/* Indent the first line; no gap between paragraphs. */
+.reading .prose p {
+  margin: 0;
+  text-indent: 2em;
+}
+
+/* Anything that is not running text gives the indent back. */
+.reading .prose blockquote p,
+.reading .prose li p,
+.reading .prose td p,
+.reading .prose th p { text-indent: 0; }
+
+/* A paragraph holding a picture is a figure, not a paragraph: centre it and
+   drop the indent. `:has()` degrades to the rule above in older browsers. */
+.reading .prose p:has(img) {
+  text-indent: 0;
+  text-align: center;
+}
+
+.reading .prose h2,
+.reading .prose h3 {
+  font-family: var(--serif);
+  text-indent: 0;
+  text-align: center;
+  letter-spacing: 0.04em;
+}
+
+.reading .prose h2 { margin: 2.75rem 0 1.25rem; font-size: 1.2rem; }
+.reading .prose h3 { margin: 2rem 0 1rem; font-size: 1.05rem; }
+
+.reading .prose blockquote { font-style: normal; }
+
+/* The navigation between chapters is part of the reading surface, not chrome
+   sitting beside it, so it takes the serif and sits centred. */
+.reading .chapter-nav {
+  font-family: var(--serif);
+  justify-content: center;
+  font-size: 0.95rem;
+  letter-spacing: 0.06em;
+}
+
+/* Reading progress. The bar is invisible until a browser supports scroll
+   timelines, which is the right failure: no bar rather than a stuck one. */
+.reading-progress {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 3px;
+  background: var(--accent);
+  transform: scaleX(0);
+  transform-origin: 0 50%;
+  z-index: 10;
+}
+
+@supports (animation-timeline: scroll()) {
+  .reading-progress {
+    animation: reading-progress linear;
+    animation-timeline: scroll(root block);
+  }
+
+  @keyframes reading-progress {
+    from { transform: scaleX(0); }
+    to { transform: scaleX(1); }
+  }
+}
+
 /* ---------- tags ---------- */
 
 .tag {
@@ -213,6 +338,92 @@ article h1 {
 }
 
 .tag:hover { color: var(--accent); border-color: var(--accent); }
+
+/* ---------- series ---------- */
+
+/* Reading-order navigation, shown above and below a chapter. A flex row rather
+   than a line of text with "·" separators, so that dropping either end — the
+   first chapter has no previous, the last has no next — cannot leave a
+   separator dangling with nothing to separate. */
+.chapter-nav {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem;
+  margin: 1.25rem 0;
+  padding: 0.6rem 0;
+  border-top: 1px solid var(--border);
+  border-bottom: 1px solid var(--border);
+  font-size: 0.9rem;
+}
+
+.chapter-nav a { color: var(--accent); text-decoration: none; }
+.chapter-nav a:hover { text-decoration: underline; }
+.chapter-sep { color: var(--fg-muted); }
+.chapter-toc { color: var(--fg-muted); }
+
+.series-head { margin-bottom: 1.5rem; }
+.series-head h1 { margin: 0 0 0.35rem; }
+
+.series-list { list-style: none; padding: 0; margin: 0; }
+
+.series-list li {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 1rem 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.series-list a { color: var(--fg); text-decoration: none; font-size: 1.1rem; }
+.series-list a:hover { color: var(--accent); }
+.series-count { color: var(--fg-muted); font-size: 0.85rem; white-space: nowrap; }
+
+/* ---------- series, laid out as a book ---------- */
+
+/* The index and the table of contents are part of the reading experience, so
+   they take the serif and the narrow column rather than looking like a blog
+   listing the reader has wandered into. */
+
+.series-head,
+.chapter-list,
+.series-list { font-family: var(--serif); }
+
+.series-head {
+  max-width: var(--reading-measure);
+  margin: 0 auto 2.75rem;
+  text-align: center;
+}
+
+.series-head h1 {
+  margin: 0 0 0.7rem;
+  font-size: 1.7rem;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+
+.series-head .post-meta { font-size: 0.85rem; letter-spacing: 0.08em; }
+
+.chapter-list {
+  max-width: var(--reading-measure);
+  margin: 0 auto;
+  padding-left: 1.7rem;
+  font-size: 1.05rem;
+  line-height: 1.85;
+}
+
+.chapter-summary { font-size: 0.85rem; letter-spacing: 0.02em; }
+
+.series-list { max-width: var(--reading-measure); margin: 0 auto; }
+
+/* Numbered, because the list is in reading order and a reader uses the number
+   to tell where they are. */
+.chapter-list { padding-left: 1.4rem; margin: 0; }
+.chapter-list li { padding: 0.5rem 0; }
+.chapter-list a { color: var(--fg); text-decoration: none; }
+.chapter-list a:hover { color: var(--accent); }
+.chapter-summary { margin: 0.25rem 0 0; color: var(--fg-muted); font-size: 0.88rem; }
 
 /* ---------- forms ---------- */
 

@@ -31,6 +31,7 @@ pub struct ExportReport {
     pub media_files: usize,
     pub posts: usize,
     pub tags: usize,
+    pub series: usize,
     pub bytes: u64,
 }
 
@@ -120,6 +121,25 @@ pub async fn export_site(
     }
     report.tags = tags.tags.len();
     log(&format!("  标签 {} 个", tags.tags.len()));
+
+    // ---- series index, then one page per series --------------------------
+    //
+    // The exporter writes the same pages the live server serves, so a series
+    // that exists only on the server would 404 on a static host. Not paginated:
+    // a series page is a table of contents, and splitting a novel's contents
+    // across pages would defeat the point of having it.
+    let series = site.series_index().await?;
+    write_page(out_dir, "series.html", &series, &mut report)?;
+
+    for item in &series.series {
+        let Some(rendered) = site.series(&item.slug).await? else {
+            continue;
+        };
+        let dir = format!("series/{}", safe_segment(&item.slug)?);
+        write_page(out_dir, &format!("{dir}.html"), &rendered, &mut report)?;
+    }
+    report.series = series.series.len();
+    log(&format!("  小说 {} 部", series.series.len()));
 
     // ---- feed, 404 and the stylesheet -----------------------------------
     let feed = site.feed().await?;

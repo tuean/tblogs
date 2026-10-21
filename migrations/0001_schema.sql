@@ -26,11 +26,28 @@ CREATE TABLE posts (
     -- Cover image as written in front matter (`image:`), usually a remote URL.
     -- Stored verbatim; the renderer resolves it so a local path becomes a
     -- /media/... URL.
-    cover_image  TEXT
+    cover_image  TEXT,
+
+    -- Series membership, for content published as ordered chapters (a novel).
+    --
+    -- `series` is the author's display string and grouping is by exact equality
+    -- against it. `series_slug` is its URL form, stored rather than computed per
+    -- request so a series URL is stable even if the slug rules change.
+    -- `chapter_order` is the position within the series: it is what lets a
+    -- series page read oldest-first while every other listing stays
+    -- newest-first. It is nullable because a series member written without an
+    -- `order:` key is still a series member.
+    series        TEXT,
+    series_slug   TEXT,
+    chapter_order INTEGER
 );
 
 -- The public index lists only published posts, newest first.
 CREATE INDEX idx_posts_feed ON posts (published, published_at DESC);
+
+-- A series page lists the chapters of one series in reading order. The column
+-- order matches the query so SQLite can walk the index directly.
+CREATE INDEX idx_posts_series ON posts (series_slug, chapter_order);
 
 CREATE TABLE tags (
     id   INTEGER PRIMARY KEY AUTOINCREMENT,

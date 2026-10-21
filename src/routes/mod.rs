@@ -24,6 +24,10 @@ pub fn router(state: AppState) -> Router {
         .route("/posts/{slug}", get(public::post_detail))
         .route("/tags", get(public::tags_index))
         .route("/tags/{slug}", get(public::tag_detail))
+        // Series are ordered reading, not chronology, so they get their own
+        // routes rather than a filter on the index.
+        .route("/series", get(public::series_index))
+        .route("/series/{slug}", get(public::series_detail))
         .route("/feed.xml", get(feed::rss))
         .route("/healthz", get(public::healthz))
         // Embedded in the binary at compile time: there is no asset tree to

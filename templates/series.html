@@ -1,0 +1,23 @@
+{% extends "base.html" %}
+
+{% block title %}{{ series.title }} · {{ site_title }}{% endblock %}
+
+{% block content %}
+<header class="series-head">
+  <h1>{{ series.title }}</h1>
+  <p class="post-meta">共 {{ series.chapter_count }} 章</p>
+</header>
+
+{#- Ascending: a novel is read from the first chapter. Every other listing on
+    the site stays newest-first, which is right for a blog and wrong for this. -#}
+<ol class="chapter-list">
+  {% for chapter in chapters %}
+  <li>
+    <a href="/posts/{{ chapter.slug|urlencode }}">{{ chapter.title }}</a>
+    {% if !chapter.summary.is_empty() %}
+    <p class="chapter-summary">{{ chapter.summary }}</p>
+    {% endif %}
+  </li>
+  {% endfor %}
+</ol>
+{% endblock %}

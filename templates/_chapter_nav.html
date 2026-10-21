@@ -1,0 +1,27 @@
+{#- Reading-order navigation for one chapter.
+
+    Included twice by post.html, above and below the body, because a reader who
+    has just finished a chapter is looking at the bottom of the page and should
+    not have to scroll back up to continue.
+
+    `nav` is the page's `Option<ChapterNav>`; askama includes share the parent's
+    context and take no arguments, so the unwrap happens here. An ordinary post
+    falls straight through and emits nothing at all — not even an empty wrapper
+    to style around.
+
+    Each end is dropped rather than disabled when there is no chapter there, so
+    the first chapter shows no "previous" link instead of a dead one, and the
+    separators only appear between things that exist. -#}
+{% if let Some(nav) = nav %}
+<nav class="chapter-nav" aria-label="章节导航">
+  {% if let Some(prev) = nav.prev %}
+  <a class="chapter-step" rel="prev" href="/posts/{{ prev.slug|urlencode }}" title="{{ prev.title }}">← 上一章</a>
+  <span class="chapter-sep" aria-hidden="true">·</span>
+  {% endif %}
+  <a class="chapter-toc" href="/series/{{ nav.series_slug|urlencode }}">目录</a>
+  {% if let Some(next) = nav.next %}
+  <span class="chapter-sep" aria-hidden="true">·</span>
+  <a class="chapter-step" rel="next" href="/posts/{{ next.slug|urlencode }}" title="{{ next.title }}">下一章 →</a>
+  {% endif %}
+</nav>
+{% endif %}

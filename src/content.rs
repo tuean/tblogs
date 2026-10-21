@@ -224,6 +224,10 @@ pub fn build_post(root: &Path, file: &SourceFile) -> Result<SourcedPost> {
         updated_at: iso_from_nanos(file.mtime),
         tags: normalise_tags(&document.front.tags),
         cover_image: document.front.image.clone(),
+        // Carried through untouched: whether the pieces form a series, and in
+        // what order, is the author's business, not the builder's.
+        series: document.front.series.clone(),
+        order: document.front.order,
     })
 }
 

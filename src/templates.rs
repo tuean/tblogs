@@ -11,7 +11,7 @@
 
 use askama::Template;
 
-use crate::models::{PostView, TagCount};
+use crate::models::{ChapterNav, PostView, SeriesSummary, TagCount};
 
 #[derive(Template)]
 #[template(path = "index.html")]
@@ -33,6 +33,31 @@ pub struct PostTemplate {
     pub site_title: String,
     pub site_description: String,
     pub post: PostView,
+    /// Reading-order navigation, present only when the post is a chapter.
+    ///
+    /// An `Option` rather than an always-empty struct so an ordinary post
+    /// renders exactly the markup it did before series existed — including no
+    /// wrapper element to style around.
+    pub nav: Option<ChapterNav>,
+}
+
+#[derive(Template)]
+#[template(path = "series_index.html")]
+pub struct SeriesIndexTemplate {
+    pub site_title: String,
+    pub site_description: String,
+    pub series: Vec<SeriesSummary>,
+}
+
+#[derive(Template)]
+#[template(path = "series.html")]
+pub struct SeriesTemplate {
+    pub site_title: String,
+    pub site_description: String,
+    /// The series itself, for the heading and the chapter count.
+    pub series: SeriesSummary,
+    /// Its chapters, in reading order.
+    pub chapters: Vec<PostView>,
 }
 
 #[derive(Template)]
